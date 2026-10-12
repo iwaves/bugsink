@@ -1,14 +1,17 @@
 import json
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from django.test import TestCase as DjangoTestCase
+from django.utils import timezone
 
 from bugsink.app_settings import get_settings, override_settings as override_bugsink_settings
 from events.factories import create_event
 from issues.factories import get_or_create_issue
 from projects.models import Project
 
+from .models import MessagingServiceConfig
 from .service_backends.slack import SLACK_RED, build_alert_message, slack_backend_send_alert
+from .service_backends.slack_app import SlackAppConfigForm
 
 
 class TestSettings(DjangoTestCase):
@@ -96,3 +99,69 @@ class TestWebhookBackendUsesBuilder(DjangoTestCase):
 
         data = json.loads(mock_post.call_args.kwargs["data"])
         self.assertIn("Event in production from CAT Backend", data["text"])
+
+
+TOKEN = "xoxb-test"
+
+
+class TestSlackAppConfigForm(DjangoTestCase):
+
+    def test_requires_bot_token(self):
+        form = SlackAppConfigForm(data={"channel": "#errors"})
+
+        self.assertFalse(form.is_valid())
+        self.assertIn("SLACK_BOT_TOKEN", form.errors["channel"][0])
+
+    def test_valid_with_token(self):
+        with override_bugsink_settings(SLACK_BOT_TOKEN=TOKEN):
+            form = SlackAppConfigForm(data={"channel": "#errors"})
+
+            self.assertTrue(form.is_valid())
+            self.assertEqual(form.get_config(), {"channel": "#errors"})
+
+
+class TestSlackAppSending(DjangoTestCase):
+
+    def setUp(self):
+        self.project = Project.objects.create(name="CAT Backend")
+        self.config = MessagingServiceConfig.objects.create(
+            project=self.project, display_name="#errors", kind="slack_app", config=json.dumps({"channel": "#errors"}))
+        self.issue, _ = get_or_create_issue(project=self.project)
+
+    @patch("alerts.service_backends.slack_app.requests.post")
+    def test_alert_is_posted_to_channel_with_bot_token(self, mock_post):
+        mock_post.return_value = Mock(json=lambda: {"ok": True})
+        self.config.last_failure_timestamp = timezone.now()
+        self.config.save()
+
+        with override_bugsink_settings(SLACK_BOT_TOKEN=TOKEN):
+            self.config.get_backend().send_alert(str(self.issue.id), "New issue", "a", "NEW")
+
+        args, kwargs = mock_post.call_args
+        self.assertEqual(args[0], "https://slack.com/api/chat.postMessage")
+        self.assertEqual(kwargs["headers"]["Authorization"], "Bearer xoxb-test")
+        self.assertEqual(kwargs["json"]["channel"], "#errors")
+        self.assertEqual(kwargs["json"]["attachments"][0]["blocks"][-1]["type"], "actions")
+        self.config.refresh_from_db()
+        self.assertIsNone(self.config.last_failure_timestamp)
+
+    @patch("alerts.service_backends.slack_app.requests.post")
+    def test_slack_error_is_stored_as_failure(self, mock_post):
+        mock_post.return_value = Mock(json=lambda: {"ok": False, "error": "channel_not_found"})
+
+        with override_bugsink_settings(SLACK_BOT_TOKEN=TOKEN):
+            self.config.get_backend().send_alert(str(self.issue.id), "New issue", "a", "NEW")
+
+        self.config.refresh_from_db()
+        self.assertEqual(self.config.last_failure_error_type, "SlackAPIError")
+        self.assertEqual(self.config.last_failure_error_message, "channel_not_found")
+
+    @patch("alerts.service_backends.slack_app.requests.post")
+    def test_test_message_is_posted_to_channel(self, mock_post):
+        mock_post.return_value = Mock(json=lambda: {"ok": True})
+
+        with override_bugsink_settings(SLACK_BOT_TOKEN=TOKEN):
+            self.config.get_backend().send_test_message()
+
+        self.assertEqual(mock_post.call_args.kwargs["json"]["channel"], "#errors")
+        self.assertIn("Test message by Bugsink", mock_post.call_args.kwargs["json"]["text"])
