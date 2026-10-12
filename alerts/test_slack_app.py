@@ -2,9 +2,12 @@ import hashlib
 import hmac
 import json
 import time
+from datetime import timedelta
 from unittest.mock import Mock, patch
+from urllib.parse import urlencode
+from uuid import uuid4
 
-from django.test import TestCase as DjangoTestCase
+from django.test import Client, TestCase as DjangoTestCase
 from django.utils import timezone
 
 from bugsink.app_settings import get_settings, override_settings as override_bugsink_settings
@@ -13,8 +16,8 @@ from issues.factories import get_or_create_issue
 from projects.models import Project
 
 from .models import MessagingServiceConfig
-from .service_backends.slack import SLACK_RED, build_alert_message, slack_backend_send_alert
-from .service_backends.slack_app import SlackAppConfigForm, verify_slack_signature
+from .service_backends.slack import SLACK_GREEN, SLACK_RED, build_alert_message, slack_backend_send_alert
+from .service_backends.slack_app import SlackAppConfigForm, slack_app_respond, verify_slack_signature
 
 
 class TestSettings(DjangoTestCase):
@@ -216,3 +219,98 @@ class TestVerifySlackSignature(DjangoTestCase):
     def test_timestamp_inside_window(self):
         timestamp, signature = sign(self.body, timestamp=int(time.time()) - 299)
         self.assertTrue(verify_slack_signature(SECRET, timestamp, self.body, signature))
+
+
+class TestSlackInteractivity(DjangoTestCase):
+    url = "/alerts/slack/interactivity/"
+
+    def setUp(self):
+        self.project = Project.objects.create(name="CAT Backend")
+        self.issue, _ = get_or_create_issue(project=self.project)
+
+    def click(self, action_id, secret=SECRET, issue_id=None):
+        payload = {
+            "type": "block_actions",
+            "response_url": "https://hooks.slack.com/actions/T1/2/3",
+            "actions": [{"action_id": action_id, "value": str(issue_id or self.issue.id)}],
+        }
+        body = urlencode({"payload": json.dumps(payload)}).encode()
+        timestamp, signature = sign(body, secret=secret)
+
+        with override_bugsink_settings(SLACK_SIGNING_SECRET=SECRET), patch("alerts.views.slack_app_respond") as respond:
+            response = Client(enforce_csrf_checks=True).post(
+                self.url, body, content_type="application/x-www-form-urlencoded",
+                HTTP_X_SLACK_REQUEST_TIMESTAMP=timestamp, HTTP_X_SLACK_SIGNATURE=signature)
+        return response, respond
+
+    def test_resolve_resolves_and_replaces_message(self):
+        response, respond = self.click("resolve")
+
+        self.assertEqual(response.status_code, 200)
+        self.issue.refresh_from_db()
+        self.assertTrue(self.issue.is_resolved)
+        response_url, body = respond.delay.call_args.args
+        self.assertEqual(response_url, "https://hooks.slack.com/actions/T1/2/3")
+        self.assertTrue(body["replace_original"])
+        self.assertIn("*Marked as fixed*", section_texts(body)[0])
+        self.assertEqual(body["attachments"][0]["color"], SLACK_GREEN)
+        self.assertNotIn("actions", [b["type"] for b in body["attachments"][0]["blocks"]])
+
+    def test_snooze_mutes_for_an_hour(self):
+        self.click("snooze")
+
+        self.issue.refresh_from_db()
+        self.assertTrue(self.issue.is_muted)
+        self.assertAlmostEqual(
+            self.issue.unmute_after.timestamp(), (timezone.now() + timedelta(hours=1)).timestamp(), delta=60)
+
+    def test_ignore_mutes_indefinitely(self):
+        self.click("ignore")
+
+        self.issue.refresh_from_db()
+        self.assertTrue(self.issue.is_muted)
+        self.assertIsNone(self.issue.unmute_after)
+
+    def test_bad_signature_is_rejected(self):
+        response, respond = self.click("resolve", secret="other")
+
+        self.assertEqual(response.status_code, 403)
+        self.issue.refresh_from_db()
+        self.assertFalse(self.issue.is_resolved)
+        respond.delay.assert_not_called()
+
+    def test_muting_a_resolved_issue_gets_an_ephemeral_reply(self):
+        self.issue.is_resolved = True
+        self.issue.save()
+
+        response, respond = self.click("ignore")
+
+        self.assertEqual(response.status_code, 200)
+        self.issue.refresh_from_db()
+        self.assertFalse(self.issue.is_muted)
+        self.assertEqual(respond.delay.call_args.args[1]["response_type"], "ephemeral")
+
+    def test_unknown_issue_gets_an_ephemeral_reply(self):
+        response, respond = self.click("resolve", issue_id=uuid4())
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(respond.delay.call_args.args[1]["response_type"], "ephemeral")
+
+    def test_get_is_not_allowed(self):
+        self.assertEqual(self.client.get(self.url).status_code, 405)
+
+
+class TestSlackAppRespond(DjangoTestCase):
+
+    @patch("alerts.service_backends.slack_app.requests.post")
+    def test_posts_body_to_response_url(self, mock_post):
+        slack_app_respond("https://hooks.slack.com/actions/T1/2/3", {"text": "x"})
+
+        mock_post.assert_called_once_with("https://hooks.slack.com/actions/T1/2/3", json={"text": "x"}, timeout=5)
+
+    @patch("alerts.service_backends.slack_app.requests.post")
+    def test_refuses_foreign_response_url(self, mock_post):
+        with self.assertRaises(ValueError):
+            slack_app_respond("https://evil.example.com/x", {"text": "x"})
+
+        mock_post.assert_not_called()

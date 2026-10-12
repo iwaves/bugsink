@@ -8,7 +8,7 @@ from django.views.generic import RedirectView, TemplateView
 from rest_framework import routers
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
 
-from alerts.views import debug_email as debug_alerts_email
+from alerts.views import debug_email as debug_alerts_email, slack_interactivity
 from users.views import debug_email as debug_users_email
 from teams.views import debug_email as debug_teams_email
 from bugsink.app_settings import get_settings
@@ -90,6 +90,8 @@ urlpatterns = [
 
     # not in /api/ because it's not part of the ingest API, but still part of the ingest app
     path('ingest/envelope/<str:envelope_id>/', download_envelope, name='download_envelope'),
+
+    path("alerts/slack/interactivity/", slack_interactivity, name="slack_interactivity"),
 
     path('projects/', include('projects.urls')),
     path('teams/', include('teams.urls')),

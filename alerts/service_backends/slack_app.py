@@ -13,6 +13,7 @@ from issues.models import Issue
 from .slack import _escape, _store_failure_info, _store_success_info, build_alert_message, latest_environment
 
 POST_MESSAGE_URL = "https://slack.com/api/chat.postMessage"
+RESPONSE_URL_PREFIX = "https://hooks.slack.com/"
 MAX_SIGNATURE_AGE = 5 * 60
 
 
@@ -88,6 +89,13 @@ def slack_app_backend_send_alert(
     issue = Issue.objects.get(id=issue_id)
     data = build_alert_message(issue, latest_environment(issue), state_description, unmute_reason, buttons=True)
     _post_message(service_config_id, {"channel": channel, **data})
+
+
+@shared_task
+def slack_app_respond(response_url, body):
+    if not response_url.startswith(RESPONSE_URL_PREFIX):
+        raise ValueError("Unexpected Slack response_url")
+    requests.post(response_url, json=body, timeout=5).raise_for_status()
 
 
 class SlackAppBackend:
