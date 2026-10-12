@@ -165,11 +165,14 @@ jobs:
         # ImportError: 'tests' module incorrectly imported from '/opt/hostedtoolcache/Python/3.10.15/x64/lib/python3.10/site-packages/alerts'. Expected '/home/runner/work/bugsink-private/bugsink-private/alerts'. Is this module globally installed? 
 
   docker:
+    needs: [ruff, bandit, test]
     runs-on: ubuntu-latest
     # Build the Docker image, start it, wait for readiness, log in at /accounts/login/,
     # and verify that / redirects to /teams/.
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Build Docker image
         run: docker build -t bugsink-ci .
