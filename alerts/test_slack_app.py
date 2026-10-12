@@ -28,7 +28,7 @@ class TestSettings(DjangoTestCase):
         self.assertEqual(get_settings().SLACK_SIGNING_SECRET, "")
 
     def test_can_be_overridden(self):
-        with override_bugsink_settings(SLACK_BOT_TOKEN="xoxb-test"):
+        with override_bugsink_settings(SLACK_BOT_TOKEN="xoxb-test"):  # nosec B106
             self.assertEqual(get_settings().SLACK_BOT_TOKEN, "xoxb-test")
 
 
@@ -108,7 +108,7 @@ class TestWebhookBackendUsesBuilder(DjangoTestCase):
         self.assertIn("Event in production from CAT Backend", data["text"])
 
 
-TOKEN = "xoxb-test"
+TOKEN = "xoxb-test"  # nosec B105
 
 
 class TestSlackAppConfigForm(DjangoTestCase):
@@ -174,7 +174,7 @@ class TestSlackAppSending(DjangoTestCase):
         self.assertIn("Test message by Bugsink", mock_post.call_args.kwargs["json"]["text"])
 
 
-SECRET = "signing-secret"
+SECRET = "signing-secret"  # nosec B105
 
 
 def sign(body, secret=SECRET, timestamp=None):
@@ -191,7 +191,7 @@ class TestVerifySlackSignature(DjangoTestCase):
         self.assertTrue(verify_slack_signature(SECRET, timestamp, self.body, signature))
 
     def test_wrong_secret(self):
-        timestamp, signature = sign(self.body, secret="other")
+        timestamp, signature = sign(self.body, secret="other")  # nosec B106
         self.assertFalse(verify_slack_signature(SECRET, timestamp, self.body, signature))
 
     def test_tampered_body(self):
@@ -203,7 +203,7 @@ class TestVerifySlackSignature(DjangoTestCase):
         self.assertFalse(verify_slack_signature(SECRET, timestamp, self.body, signature))
 
     def test_unset_secret_never_verifies(self):
-        timestamp, signature = sign(self.body, secret="")
+        timestamp, signature = sign(self.body, secret="")  # nosec B106
         self.assertFalse(verify_slack_signature("", timestamp, self.body, signature))
 
     def test_missing_or_garbled_headers(self):
@@ -273,7 +273,7 @@ class TestSlackInteractivity(DjangoTestCase):
         self.assertIsNone(self.issue.unmute_after)
 
     def test_bad_signature_is_rejected(self):
-        response, respond = self.click("resolve", secret="other")
+        response, respond = self.click("resolve", secret="other")  # nosec B106
 
         self.assertEqual(response.status_code, 403)
         self.issue.refresh_from_db()
