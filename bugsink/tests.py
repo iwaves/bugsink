@@ -14,6 +14,7 @@ from django.contrib.auth import get_user_model
 from django.test.utils import CaptureQueriesContext
 from django.db import connection
 from .wsgi import allowed_hosts_error_message
+from .app_settings import override_settings as override_bugsink_settings
 
 from .test_utils import TransactionTestCase25251 as TransactionTestCase
 from .transaction import immediate_atomic
@@ -454,6 +455,20 @@ class ContentEncodingCheckMiddlewareTestCase(DjangoTestCase):
     def test_speak_brotli_with_arbitrary_view_fails(self):
         response = self.client.post("/", headers={"Content-Encoding": "br"})
         self.assertTrue(b"Content-Encoding handling is not supported for endpoint `home`" in response.content)
+
+
+class SettingsViewTestCase(DjangoTestCase):
+
+    def test_secrets_are_masked(self):
+        superuser = User.objects.create_superuser(username="admin", password="admin")
+        self.client.force_login(superuser)
+
+        with override_bugsink_settings(SLACK_BOT_TOKEN="xoxb-secret-token", SLACK_SIGNING_SECRET="secret-signing"):
+            response = self.client.get("/settings/")
+
+        self.assertContains(response, "SLACK_BOT_TOKEN")
+        self.assertNotContains(response, "xoxb-secret-token")
+        self.assertNotContains(response, "secret-signing")
 
 
 class AllowedHostsMsgTestCase(DjangoTestCase):
