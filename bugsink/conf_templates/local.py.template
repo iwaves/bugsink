@@ -93,6 +93,10 @@ BUGSINK = {
     # "ALERTS_WEBHOOK_DENY_LIST": ["bad.example.com", "198.51.100.0/24"],
     # "ALERTS_WEBHOOK_DENY_NON_GLOBAL": True,
 
+    # Slack app (alerts kind "slack_app"): bot token (xoxb-...) and the app's signing secret.
+    # "SLACK_BOT_TOKEN": "",
+    # "SLACK_SIGNING_SECRET": "",
+
     # "EVENT_STORAGES": {
     #     "local_flat_files": {  # a meaningful name of your choosing
     #         "STORAGE": "events.storage.FileEventStorage",
