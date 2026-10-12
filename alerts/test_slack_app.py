@@ -43,8 +43,10 @@ class TestBuildAlertMessage(DjangoTestCase):
 
         message = build_alert_message(self.issue, "production", "New issue", buttons=True)
 
+        self.assertEqual(
+            message["text"],
+            f"Event in production from CAT Backend in GET /payment/finalize-transaction (<{self.url}|details>)")
         self.assertEqual(section_texts(message), [
-            f"Event in production from CAT Backend in GET /payment/finalize-transaction (<{self.url}|details>)",
             '*New issue*\nIllegalTransitionException: Illegal transition "cancel"',
             "*Location*\nsrc/Controller.php - App\\Controller.finalizeTransaction",
         ])
@@ -57,20 +59,27 @@ class TestBuildAlertMessage(DjangoTestCase):
     def test_minimal_message_has_no_location_and_no_buttons(self):
         message = build_alert_message(self.issue, "", "Regression")
 
-        self.assertEqual(section_texts(message)[0], f"Event from CAT Backend (<{self.url}|details>)")
-        self.assertEqual(len(message["attachments"][0]["blocks"]), 2)
+        self.assertEqual(message["text"], f"Event from CAT Backend (<{self.url}|details>)")
+        self.assertEqual(len(message["attachments"][0]["blocks"]), 1)
 
     def test_escapes_special_characters(self):
         self.issue.transaction = "GET /a?b=1&c=<x>"
 
         message = build_alert_message(self.issue, "", "New issue")
 
-        self.assertIn("in GET /a?b=1&amp;c=&lt;x&gt; (", section_texts(message)[0])
+        self.assertIn("in GET /a?b=1&amp;c=&lt;x&gt; (", message["text"])
+
+    def test_escapes_title(self):
+        self.issue.calculated_value = "<!channel> & co"
+
+        message = build_alert_message(self.issue, "", "New issue")
+
+        self.assertIn("&lt;!channel&gt; &amp; co", section_texts(message)[0])
 
     def test_unmute_reason_is_added(self):
         message = build_alert_message(self.issue, "", "Unmuted issue", unmute_reason="Seen 5 times today")
 
-        self.assertEqual(section_texts(message)[2], "Seen 5 times today")
+        self.assertEqual(section_texts(message)[1], "Seen 5 times today")
 
 
 class TestWebhookBackendUsesBuilder(DjangoTestCase):
@@ -86,4 +95,4 @@ class TestWebhookBackendUsesBuilder(DjangoTestCase):
         slack_backend_send_alert("https://hooks.slack.com/test", str(issue.id), "New issue", "a", "NEW", config.id)
 
         data = json.loads(mock_post.call_args.kwargs["data"])
-        self.assertIn("Event in production from CAT Backend", data["attachments"][0]["blocks"][0]["text"]["text"])
+        self.assertIn("Event in production from CAT Backend", data["text"])

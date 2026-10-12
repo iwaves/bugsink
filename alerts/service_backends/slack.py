@@ -3,7 +3,6 @@ import requests
 from django.utils import timezone
 
 from django import forms
-from django.template.defaultfilters import truncatechars
 
 from snappea.decorators import shared_task
 from bugsink.app_settings import get_settings
@@ -81,7 +80,7 @@ def build_alert_message(issue, environment, state_description, unmute_reason=Non
         header.append(f"in {_escape(issue.transaction)}")
     header.append(f"(<{issue_url}|details>)")
 
-    blocks = [_mrkdwn(" ".join(header)), _mrkdwn(f"*{_escape(state_description)}*\n{_escape(issue.title())}")]
+    blocks = [_mrkdwn(f"*{_escape(state_description)}*\n{_escape(issue.title())}")]
 
     if unmute_reason:
         blocks.append(_mrkdwn(unmute_reason))
@@ -98,7 +97,8 @@ def build_alert_message(issue, environment, state_description, unmute_reason=Non
             for action_id, label in SLACK_BUTTONS.items()
         ]})
 
-    return {"text": truncatechars(issue.title(), 150), "attachments": [{"color": color, "blocks": blocks}]}
+    # the header is the top-level text: Slack shows it above the colored bar, like Bugsnag does
+    return {"text": " ".join(header), "attachments": [{"color": color, "blocks": blocks}]}
 
 
 def _store_failure_info(service_config_id, exception, response=None):
