@@ -10,7 +10,7 @@ from uuid import uuid4
 from django.test import Client, TestCase as DjangoTestCase
 from django.utils import timezone
 
-from bugsink.app_settings import get_settings, override_settings as override_bugsink_settings
+from bugsink.app_settings import DEFAULTS, get_settings, override_settings as override_bugsink_settings
 from events.factories import create_event
 from issues.factories import get_or_create_issue
 from issues.models import TurningPoint, TurningPointKind
@@ -24,8 +24,8 @@ from .service_backends.slack_app import SlackAppConfigForm, slack_app_respond, v
 class TestSettings(DjangoTestCase):
 
     def test_defaults_are_empty(self):
-        self.assertEqual(get_settings().SLACK_BOT_TOKEN, "")
-        self.assertEqual(get_settings().SLACK_SIGNING_SECRET, "")
+        self.assertEqual(DEFAULTS["SLACK_BOT_TOKEN"], "")
+        self.assertEqual(DEFAULTS["SLACK_SIGNING_SECRET"], "")
 
     def test_can_be_overridden(self):
         with override_bugsink_settings(SLACK_BOT_TOKEN="xoxb-test"):  # nosec B106
@@ -122,10 +122,11 @@ TOKEN = "xoxb-test"  # nosec B105
 class TestSlackAppConfigForm(DjangoTestCase):
 
     def test_requires_bot_token(self):
-        form = SlackAppConfigForm(data={"channel": "#errors"})
+        with override_bugsink_settings(SLACK_BOT_TOKEN=""):  # nosec B106
+            form = SlackAppConfigForm(data={"channel": "#errors"})
 
-        self.assertFalse(form.is_valid())
-        self.assertIn("SLACK_BOT_TOKEN", form.errors["channel"][0])
+            self.assertFalse(form.is_valid())
+            self.assertIn("SLACK_BOT_TOKEN", form.errors["channel"][0])
 
     def test_valid_with_token(self):
         with override_bugsink_settings(SLACK_BOT_TOKEN=TOKEN):
@@ -226,7 +227,7 @@ class TestVerifySlackSignature(DjangoTestCase):
         self.assertFalse(verify_slack_signature(SECRET, timestamp, self.body, signature))
 
     def test_timestamp_inside_window(self):
-        timestamp, signature = sign(self.body, timestamp=int(time.time()) - 299)
+        timestamp, signature = sign(self.body, timestamp=int(time.time()) - 290)
         self.assertTrue(verify_slack_signature(SECRET, timestamp, self.body, signature))
 
 
@@ -251,6 +252,26 @@ class TestSlackInteractivity(DjangoTestCase):
                 self.url, body, content_type="application/x-www-form-urlencoded",
                 HTTP_X_SLACK_REQUEST_TIMESTAMP=timestamp, HTTP_X_SLACK_SIGNATURE=signature)
         return response, respond
+
+    @patch("alerts.service_backends.slack_app.requests.post")
+    def test_every_button_of_a_sent_alert_is_handled(self, mock_post):
+        mock_post.return_value = Mock(json=lambda: {"ok": True})
+
+        for index, state in enumerate(["is_resolved", "is_muted", "is_muted"]):
+            project = Project.objects.create(name=f"Project {index}")
+            issue, _ = get_or_create_issue(project=project)
+            config = MessagingServiceConfig.objects.create(
+                project=project, display_name="#errors", kind="slack_app", config=json.dumps({"channel": "#errors"}))
+            with override_bugsink_settings(SLACK_BOT_TOKEN=TOKEN):
+                config.get_backend().send_alert(str(issue.id), "New issue", "a", "NEW")
+            buttons = mock_post.call_args.kwargs["json"]["attachments"][0]["blocks"][-1]["elements"]
+            self.assertEqual(len(buttons), 3)
+
+            response, _ = self.click(buttons[index]["action_id"], issue_id=buttons[index]["value"])
+
+            self.assertEqual(response.status_code, 200)
+            issue.refresh_from_db()
+            self.assertTrue(getattr(issue, state), buttons[index]["action_id"])
 
     def test_resolve_resolves_and_replaces_message(self):
         response, respond = self.click("resolve")
