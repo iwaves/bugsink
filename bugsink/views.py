@@ -120,7 +120,7 @@ def settings_view(request):
 
     def get_setting(settings, key):
         value = getattr(settings, key, None)
-        if key in ["EMAIL_HOST_PASSWORD", "EMAIL_HOST_USER"]:
+        if key in ["EMAIL_HOST_PASSWORD", "EMAIL_HOST_USER", "SLACK_BOT_TOKEN", "SLACK_SIGNING_SECRET"]:
             return "********" if value else ""
         return value
 
@@ -129,7 +129,7 @@ def settings_view(request):
             if isinstance(v, int) and v > 0 and v % 1024 == 0:
                 return "%s (%s)" % (v, filesizeformat(v))
             return v
-        return {k: maybe_round(v) for k, v in settings.items()}
+        return {k: maybe_round(get_setting(settings, k)) for k in settings}
 
     misc_settings = {
         k: get_setting(settings, k) for k in (

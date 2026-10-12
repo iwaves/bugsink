@@ -203,6 +203,12 @@ BUGSINK = {
     "ALERTS_WEBHOOK_DENY_NON_GLOBAL":
         os.getenv("ALERTS_WEBHOOK_DENY_NON_GLOBAL", "true").lower() in ("true", "1", "yes"),
 
+    # Slack app (alerts kind "slack_app"): bot token (xoxb-...) and the app's signing secret. The Slack app needs the
+    # `chat:write` scope and the bot must be invited to each alert channel. For the Mark as fixed / Snooze / Ignore
+    # buttons, set the app's Interactivity Request URL to {BASE_URL}/alerts/slack/interactivity/
+    "SLACK_BOT_TOKEN": os.getenv("SLACK_BOT_TOKEN", ""),
+    "SLACK_SIGNING_SECRET": os.getenv("SLACK_SIGNING_SECRET", ""),
+
     # Feature flags
     "FEATURE_MINIDUMPS": os.getenv("FEATURE_MINIDUMPS", "false").lower() in ("true", "1", "yes"),
 }

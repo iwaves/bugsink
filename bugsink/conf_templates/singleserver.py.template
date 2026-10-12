@@ -133,6 +133,12 @@ BUGSINK = {
     # "ALERTS_WEBHOOK_DENY_LIST": ["bad.example.com", "198.51.100.0/24"],
     # "ALERTS_WEBHOOK_DENY_NON_GLOBAL": True,
 
+    # Slack app (alerts kind "slack_app"): bot token (xoxb-...) and the app's signing secret. The Slack app needs the
+    # `chat:write` scope and the bot must be invited to each alert channel. For the Mark as fixed / Snooze / Ignore
+    # buttons, set the app's Interactivity Request URL to {BASE_URL}/alerts/slack/interactivity/
+    # "SLACK_BOT_TOKEN": "",
+    # "SLACK_SIGNING_SECRET": "",
+
     # "EVENT_STORAGES": {
     #     "local_flat_files": {  # a meaningful name of your choosing
     #         "STORAGE": "events.storage.FileEventStorage",

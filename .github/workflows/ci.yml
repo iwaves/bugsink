@@ -165,11 +165,14 @@ jobs:
         # ImportError: 'tests' module incorrectly imported from '/opt/hostedtoolcache/Python/3.10.15/x64/lib/python3.10/site-packages/alerts'. Expected '/home/runner/work/bugsink-private/bugsink-private/alerts'. Is this module globally installed? 
 
   docker:
+    needs: [ruff, bandit, test]
     runs-on: ubuntu-latest
     # Build the Docker image, start it, wait for readiness, log in at /accounts/login/,
     # and verify that / redirects to /teams/.
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Build Docker image
         run: docker build -t bugsink-ci .
@@ -236,6 +239,19 @@ jobs:
           fi
 
           echo "Login OK and / redirects to /teams/"
+
+      - name: Push image to Docker Hub
+        # Only after the smoke test above passed; never for pull requests (which also get no secrets).
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          DOCKER_REGISTRY_USERNAME: ${{ secrets.DOCKER_REGISTRY_USERNAME }}
+          DOCKER_REGISTRY_PASSWORD: ${{ secrets.DOCKER_REGISTRY_PASSWORD }}
+        run: |
+          echo "$DOCKER_REGISTRY_PASSWORD" | docker login -u "$DOCKER_REGISTRY_USERNAME" --password-stdin
+          for tag in latest "sha-${GITHUB_SHA::7}"; do
+            docker tag bugsink-ci "iwaves/bugsink:$tag"
+            docker push "iwaves/bugsink:$tag"
+          done
 
       - name: Show Docker logs
         if: always()

@@ -107,6 +107,10 @@ DEFAULTS = {
     "ALERTS_WEBHOOK_DENY_LIST": [],
     "ALERTS_WEBHOOK_DENY_NON_GLOBAL": True,
 
+    # Slack app (alerts kind "slack_app"): one app per installation. The signing secret verifies button clicks.
+    "SLACK_BOT_TOKEN": "",
+    "SLACK_SIGNING_SECRET": "",
+
     # Feature flags:
     "FEATURE_MINIDUMPS": False,  # minidumps are experimental/early-stage and likely a DOS-magnet; disabled by default
 

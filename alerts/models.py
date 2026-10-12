@@ -2,6 +2,7 @@ from django.db import models
 from projects.models import Project
 
 from .service_backends.slack import SlackBackend
+from .service_backends.slack_app import SlackAppBackend
 from .service_backends.mattermost import MattermostBackend
 from .service_backends.discord import DiscordBackend
 from .service_backends.telegram import TelegramBackend
@@ -19,6 +20,7 @@ def get_alert_service_kind_choices():
         ("mattermost", "Mattermost"),
         ("msteams", "Microsoft Teams"),
         ("slack", "Slack"),
+        ("slack_app", "Slack app"),
         ("telegram", "Telegram"),
         ("custom", "Custom"),
     ]
@@ -35,6 +37,8 @@ def get_alert_service_backend_class(kind):
         return MsTeamsBackend
     if kind == "slack":
         return SlackBackend
+    if kind == "slack_app":
+        return SlackAppBackend
     if kind == "telegram":
         return TelegramBackend
     if kind == "custom":
