@@ -21,8 +21,11 @@
 ## Components
 
 ### Settings
-`SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET` (default empty) in `bugsink/app_settings.py` DEFAULTS, and read from env in
-all three `bugsink/conf_templates/*.py.template` (docker needs this: it only knows env vars).
+`SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET` (default empty) in `bugsink/app_settings.py` DEFAULTS. Only
+`docker.py.template` reads them from env (docker only knows env vars); `local` and `singleserver` carry commented
+examples. All three carry an operator comment: the Slack app needs `chat:write`, the bot must be invited to each alert
+channel, and the Interactivity Request URL is `{BASE_URL}/alerts/slack/interactivity/`. Both values are masked on the
+superuser `/settings/` page.
 
 ### Message builder (`alerts/service_backends/slack.py`)
 `build_alert_message(issue, environment, state_description, unmute_reason=None, buttons=False, color=RED)` returns the JSON
@@ -31,17 +34,19 @@ attachment `{color, blocks}` holding the rest:
 
 * top-level `text` (mrkdwn): `Event in {environment} from {project} in {transaction} (<url|details>)`; empty parts omitted
 * `state_description` ("New issue" / "Regression" / "Unmuted issue"), plus `unmute_reason` when given
-* `issue.title()` as a mrkdwn section (not cut at 150 chars)
+* `issue.title()` as a mrkdwn section, truncated to 500 raw characters (before escaping: Slack rejects sections over
+  3000 characters and escaping grows the text)
 * `Location`: `last_frame_filename - last_frame_module.last_frame_function` from the issue's denormalized columns; omitted when
   empty (no line numbers: not a column)
 * if `buttons`: an actions block with 3 buttons; `action_id` in `resolve` / `snooze` / `ignore`, `value` = issue id
 
 `environment` = that of the issue's latest event (`latest_environment(issue)`, empty if no event; the only value that
-needs an event query). Both
-webhook and app tasks use this; `_safe_markdown` escaping applies to all dynamic text.
+needs an event query, and it loads only the `environment` column). Both webhook and app tasks use this; dynamic text
+is escaped with `_escape` (only `&`, `<`, `>`, the characters Slack requires), not `_safe_markdown`.
 
 ### Sending (`alerts/service_backends/slack_app.py`)
-* `SlackAppConfigForm`: `channel` (required); `clean()` fails with a clear message if `SLACK_BOT_TOKEN` is unset.
+* `SlackAppConfigForm`: `channel` (required); `clean_channel()` fails with a clear message if `SLACK_BOT_TOKEN` is
+  unset.
 * `slack_app_backend_send_alert` task: POST `https://slack.com/api/chat.postMessage` (plain `requests`, 5s timeout,
   fixed host so no `safe_post`), `Authorization: Bearer <token>`, payload + `channel`. Slack answers 200 on failure, so
   check `ok` in the JSON; failures go through the existing `_store_failure_info` / `_store_success_info`.
@@ -53,13 +58,15 @@ webhook and app tasks use this; `_safe_markdown` escaping applies to all dynamic
 
 1. Verify: `v0=` + HMAC-SHA256(signing secret, `v0:{timestamp}:{raw body}`) with `hmac.compare_digest`; reject
    timestamps older than 5 minutes; reject everything if the secret is unset. 4xx on failure.
-2. Parse form field `payload` (JSON), type `block_actions`; map `action_id` to `resolve` / `mute_for:hour,1,` /
-   `mute`; `apply_issue_action(IssueStateManager, issue, action, user=None)`, `issue.save()`, in one transaction.
+2. Parse form field `payload` (JSON). A payload whose type is not `block_actions`, or with an unknown `action_id`,
+   is a 400. Map `action_id` to `resolve` / `mute_for:hour,1,` / `mute`. Inside one transaction: load the issue, gate on
+   `is_valid_issue_action`, then `apply_issue_action(IssueStateManager, issue, action, user=None)` and `issue.save()`.
 3. Return 200 immediately; then a snappea task POSTs to `response_url` (accepted only if it starts with
    `https://hooks.slack.com/`) with `replace_original`: the same message rebuilt with `buttons=False`, a status as
    `state_description` ("Marked as fixed" / "Snoozed for 1 hour" / "Ignored") and a green bar.
-4. Unknown/deleted issue, or `IncongruentStateException` (e.g. mute on a resolved issue): ephemeral reply via
-   `response_url` ("Issue is already resolved"), no state change.
+4. Action not valid for the issue's current state (e.g. mute on a resolved issue, resolve twice): ephemeral reply via
+   `response_url` ("This issue has already been resolved or muted."), no state change. `IncongruentStateException` is
+   not used. Unknown/deleted issue: ephemeral "This issue no longer exists.".
 
 ## Testing
 
@@ -67,6 +74,9 @@ webhook and app tasks use this; `_safe_markdown` escaping applies to all dynamic
   without event/environment/Location, with/without buttons).
 * Integration: send alert via `slack_app` with mocked `requests.post` (assert channel, token header, buttons), then a
   signed click on "resolve" resolves the issue and posts the replacement to a mocked `response_url`.
+* Chained buttons: send an alert through `slack_app` with mocked `requests.post`, take each button's `action_id` and
+  `value` from the posted payload, and POST a signed click built from them; each must return 200 and change the issue
+  (resolved / muted / muted). Guards that the ids built in `slack.py` match the click endpoint's keys.
 * Existing Slack tests keep passing; webhook alert test asserts the new attachment shape.
 
 ## Deployment
