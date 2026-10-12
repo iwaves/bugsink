@@ -13,6 +13,7 @@ from django.utils import timezone
 from bugsink.app_settings import get_settings, override_settings as override_bugsink_settings
 from events.factories import create_event
 from issues.factories import get_or_create_issue
+from issues.models import TurningPoint, TurningPointKind
 from projects.models import Project
 
 from .models import MessagingServiceConfig
@@ -228,9 +229,9 @@ class TestSlackInteractivity(DjangoTestCase):
         self.project = Project.objects.create(name="CAT Backend")
         self.issue, _ = get_or_create_issue(project=self.project)
 
-    def click(self, action_id, secret=SECRET, issue_id=None):
+    def click(self, action_id, secret=SECRET, issue_id=None, payload_type="block_actions"):
         payload = {
-            "type": "block_actions",
+            "type": payload_type,
             "response_url": "https://hooks.slack.com/actions/T1/2/3",
             "actions": [{"action_id": action_id, "value": str(issue_id or self.issue.id)}],
         }
@@ -295,6 +296,39 @@ class TestSlackInteractivity(DjangoTestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(respond.delay.call_args.args[1]["response_type"], "ephemeral")
+
+    def test_resolving_twice_writes_one_history_row(self):
+        self.click("resolve")
+        _, respond = self.click("resolve")
+
+        self.assertEqual(respond.delay.call_args.args[1]["response_type"], "ephemeral")
+        self.assertEqual(TurningPoint.objects.filter(issue=self.issue, kind=TurningPointKind.RESOLVED).count(), 1)
+
+    def test_ignore_after_snooze_is_refused(self):
+        self.click("snooze")
+        self.issue.refresh_from_db()
+        unmute_after = self.issue.unmute_after
+
+        _, respond = self.click("ignore")
+
+        self.assertEqual(respond.delay.call_args.args[1]["response_type"], "ephemeral")
+        self.issue.refresh_from_db()
+        self.assertIsNotNone(unmute_after)
+        self.assertEqual(self.issue.unmute_after, unmute_after)
+
+    def test_unknown_action_is_a_bad_request(self):
+        response, respond = self.click("bogus")
+
+        self.assertEqual(response.status_code, 400)
+        respond.delay.assert_not_called()
+
+    def test_non_block_actions_payload_is_a_bad_request(self):
+        response, respond = self.click("resolve", payload_type="view_submission")
+
+        self.assertEqual(response.status_code, 400)
+        self.issue.refresh_from_db()
+        self.assertFalse(self.issue.is_resolved)
+        respond.delay.assert_not_called()
 
     def test_get_is_not_allowed(self):
         self.assertEqual(self.client.get(self.url).status_code, 405)

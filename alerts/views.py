@@ -1,6 +1,6 @@
 import json
 
-from django.http import HttpResponse, HttpResponseForbidden
+from django.http import HttpResponse, HttpResponseBadRequest, HttpResponseForbidden
 from django.shortcuts import render
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
@@ -8,7 +8,7 @@ from django.views.decorators.http import require_POST
 from bugsink.app_settings import get_settings
 from bugsink.decorators import login_exempt
 from bugsink.transaction import immediate_atomic
-from issues.models import Issue, IncongruentStateException, IssueStateManager, apply_issue_action
+from issues.models import Issue, IssueStateManager, apply_issue_action, is_valid_issue_action
 
 from .service_backends.slack import SLACK_GREEN, build_alert_message, latest_environment
 from .service_backends.slack_app import slack_app_respond, verify_slack_signature
@@ -54,21 +54,26 @@ def slack_interactivity(request):
         return HttpResponseForbidden()
 
     payload = json.loads(request.POST["payload"])
-    action = payload["actions"][0]
+    action = (payload.get("actions") or [{}])[0]
+    if payload.get("type") != "block_actions" or action.get("action_id") not in SLACK_ISSUE_ACTIONS:
+        return HttpResponseBadRequest()
     issue_action, status = SLACK_ISSUE_ACTIONS[action["action_id"]]
 
     try:
         with immediate_atomic(only_if_needed=True):
             issue = Issue.objects.get(id=action["value"], is_deleted=False)
-            apply_issue_action(IssueStateManager, issue, issue_action, user=None)
-            issue.save()
+            is_valid = is_valid_issue_action(issue_action, issue)
+            if is_valid:
+                apply_issue_action(IssueStateManager, issue, issue_action, user=None)
+                issue.save()
     except Issue.DoesNotExist:
         reply = _ephemeral("This issue no longer exists.")
-    except IncongruentStateException:
-        reply = _ephemeral("This issue is already resolved.")
     else:
-        message = build_alert_message(issue, latest_environment(issue), status, color=SLACK_GREEN)
-        reply = {"replace_original": True, **message}
+        if is_valid:
+            reply = {"replace_original": True, **build_alert_message(
+                issue, latest_environment(issue), status, color=SLACK_GREEN)}
+        else:
+            reply = _ephemeral("This issue has already been resolved or muted.")
 
     slack_app_respond.delay(payload["response_url"], reply)
     return HttpResponse()
