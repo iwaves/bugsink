@@ -25,17 +25,18 @@
 all three `bugsink/conf_templates/*.py.template` (docker needs this: it only knows env vars).
 
 ### Message builder (`alerts/service_backends/slack.py`)
-`build_alert_message(issue, event, state_description, unmute_reason=None, buttons=False, color=RED)` returns the JSON
+`build_alert_message(issue, environment, state_description, unmute_reason=None, buttons=False, color=RED)` returns the JSON
 payload: top-level `text` (notification fallback) plus one attachment `{color, blocks}`:
 
 * header line (mrkdwn): `Event in {environment} from {project} in {transaction} (<url|details>)`; empty parts omitted
 * `state_description` ("New issue" / "Regression" / "Unmuted issue"), plus `unmute_reason` when given
 * `issue.title()` as a mrkdwn section (not cut at 150 chars)
-* `Location`: `last_frame_filename - last_frame_module.last_frame_function` from the event's columns; omitted when empty
-  (no line numbers: not a column)
+* `Location`: `last_frame_filename - last_frame_module.last_frame_function` from the issue's denormalized columns; omitted when
+  empty (no line numbers: not a column)
 * if `buttons`: an actions block with 3 buttons; `action_id` in `resolve` / `snooze` / `ignore`, `value` = issue id
 
-`event` = latest event of the issue (`digest_order` desc); may be None, then environment/Location are omitted. Both
+`environment` = that of the issue's latest event (`latest_environment(issue)`, empty if no event; the only value that
+needs an event query). Both
 webhook and app tasks use this; `_safe_markdown` escaping applies to all dynamic text.
 
 ### Sending (`alerts/service_backends/slack_app.py`)
