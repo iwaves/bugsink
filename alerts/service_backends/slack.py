@@ -1,5 +1,6 @@
 import json
 import requests
+from django.template.defaultfilters import truncatechars
 from django.utils import timezone
 
 from django import forms
@@ -65,8 +66,7 @@ def _mrkdwn(text):
 
 
 def latest_environment(issue):
-    event = issue.event_set.order_by("-digest_order").first()
-    return event.environment if event else ""
+    return issue.event_set.order_by("-digest_order").values_list("environment", flat=True).first() or ""
 
 
 def build_alert_message(issue, environment, state_description, unmute_reason=None, buttons=False, color=SLACK_RED):
@@ -80,7 +80,7 @@ def build_alert_message(issue, environment, state_description, unmute_reason=Non
         header.append(f"in {_escape(issue.transaction)}")
     header.append(f"(<{issue_url}|details>)")
 
-    blocks = [_mrkdwn(f"*{_escape(state_description)}*\n{_escape(issue.title())}")]
+    blocks = [_mrkdwn(f"*{_escape(state_description)}*\n{_escape(truncatechars(issue.title(), 500))}")]
 
     if unmute_reason:
         blocks.append(_mrkdwn(unmute_reason))

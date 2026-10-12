@@ -86,6 +86,14 @@ class TestBuildAlertMessage(DjangoTestCase):
 
         self.assertIn("&lt;!channel&gt; &amp; co", section_texts(message)[0])
 
+    def test_long_title_is_truncated_before_escaping(self):
+        self.issue.calculated_value = "<" * 1000
+
+        title_section = section_texts(build_alert_message(self.issue, "", "New issue"))[0]
+
+        self.assertLess(len(title_section), 3000)
+        self.assertTrue(title_section.endswith("…"))
+
     def test_unmute_reason_is_added(self):
         message = build_alert_message(self.issue, "", "Unmuted issue", unmute_reason="Seen 5 times today")
 
