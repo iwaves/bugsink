@@ -237,6 +237,19 @@ jobs:
 
           echo "Login OK and / redirects to /teams/"
 
+      - name: Push image to Docker Hub
+        # Only after the smoke test above passed; never for pull requests (which also get no secrets).
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          DOCKER_REGISTRY_USERNAME: ${{ secrets.DOCKER_REGISTRY_USERNAME }}
+          DOCKER_REGISTRY_PASSWORD: ${{ secrets.DOCKER_REGISTRY_PASSWORD }}
+        run: |
+          echo "$DOCKER_REGISTRY_PASSWORD" | docker login -u "$DOCKER_REGISTRY_USERNAME" --password-stdin
+          for tag in latest "sha-${GITHUB_SHA::7}"; do
+            docker tag bugsink-ci "iwaves/bugsink:$tag"
+            docker push "iwaves/bugsink:$tag"
+          done
+
       - name: Show Docker logs
         if: always()
         run: docker logs bugsink-ci || true
