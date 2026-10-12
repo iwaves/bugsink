@@ -122,8 +122,8 @@ git commit -m "Add SLACK_BOT_TOKEN and SLACK_SIGNING_SECRET settings"
 
 **Acceptance Criteria:**
 - [ ] Message = top-level `text` + one attachment `{color, blocks}`
-- [ ] Header: `Event in {env} from {project} in {transaction} (<url|details>)`; env and transaction omitted when empty
-- [ ] Second block: `*{state}*\n{title}` (full title, no truncation)
+- [ ] Top-level `text` (rendered by Slack above the colored bar, as Bugsnag does) = header `Event in {env} from {project} in {transaction} (<url|details>)`; env and transaction omitted when empty; dynamic parts escaped
+- [ ] First attachment block: `*{state}*\n{title}` (full title, no truncation, escaped)
 - [ ] Location block only when the issue has last-frame data: `{filename} - {module}.{function}`
 - [ ] `unmute_reason` appended as its own section when given
 - [ ] Actions block with 3 buttons (`resolve`, `snooze`, `ignore`; value = issue id) only when `buttons=True`
@@ -169,8 +169,10 @@ class TestBuildAlertMessage(DjangoTestCase):
 
         message = build_alert_message(self.issue, "production", "New issue", buttons=True)
 
+        self.assertEqual(
+            message["text"],
+            f"Event in production from CAT Backend in GET /payment/finalize-transaction (<{self.url}|details>)")
         self.assertEqual(section_texts(message), [
-            f"Event in production from CAT Backend in GET /payment/finalize-transaction (<{self.url}|details>)",
             '*New issue*\nIllegalTransitionException: Illegal transition "cancel"',
             "*Location*\nsrc/Controller.php - App\\Controller.finalizeTransaction",
         ])
@@ -183,20 +185,27 @@ class TestBuildAlertMessage(DjangoTestCase):
     def test_minimal_message_has_no_location_and_no_buttons(self):
         message = build_alert_message(self.issue, "", "Regression")
 
-        self.assertEqual(section_texts(message)[0], f"Event from CAT Backend (<{self.url}|details>)")
-        self.assertEqual(len(message["attachments"][0]["blocks"]), 2)
+        self.assertEqual(message["text"], f"Event from CAT Backend (<{self.url}|details>)")
+        self.assertEqual(len(message["attachments"][0]["blocks"]), 1)
 
     def test_escapes_special_characters(self):
         self.issue.transaction = "GET /a?b=1&c=<x>"
 
         message = build_alert_message(self.issue, "", "New issue")
 
-        self.assertIn("in GET /a?b=1&amp;c=&lt;x&gt; (", section_texts(message)[0])
+        self.assertIn("in GET /a?b=1&amp;c=&lt;x&gt; (", message["text"])
+
+    def test_escapes_title(self):
+        self.issue.calculated_value = "<!channel> & co"
+
+        message = build_alert_message(self.issue, "", "New issue")
+
+        self.assertIn("&lt;!channel&gt; &amp; co", section_texts(message)[0])
 
     def test_unmute_reason_is_added(self):
         message = build_alert_message(self.issue, "", "Unmuted issue", unmute_reason="Seen 5 times today")
 
-        self.assertEqual(section_texts(message)[2], "Seen 5 times today")
+        self.assertEqual(section_texts(message)[1], "Seen 5 times today")
 
 
 class TestWebhookBackendUsesBuilder(DjangoTestCase):
@@ -212,7 +221,7 @@ class TestWebhookBackendUsesBuilder(DjangoTestCase):
         slack_backend_send_alert("https://hooks.slack.com/test", str(issue.id), "New issue", "a", "NEW", config.id)
 
         data = json.loads(mock_post.call_args.kwargs["data"])
-        self.assertIn("Event in production from CAT Backend", data["attachments"][0]["blocks"][0]["text"]["text"])
+        self.assertIn("Event in production from CAT Backend", data["text"])
 ```
 
 - [ ] **Step 2: Run to verify they fail**
@@ -255,7 +264,7 @@ def build_alert_message(issue, environment, state_description, unmute_reason=Non
         header.append(f"in {_escape(issue.transaction)}")
     header.append(f"(<{issue_url}|details>)")
 
-    blocks = [_mrkdwn(" ".join(header)), _mrkdwn(f"*{_escape(state_description)}*\n{_escape(issue.title())}")]
+    blocks = [_mrkdwn(f"*{_escape(state_description)}*\n{_escape(issue.title())}")]
 
     if unmute_reason:
         blocks.append(_mrkdwn(unmute_reason))
@@ -272,7 +281,8 @@ def build_alert_message(issue, environment, state_description, unmute_reason=Non
             for action_id, label in SLACK_BUTTONS.items()
         ]})
 
-    return {"text": truncatechars(issue.title(), 150), "attachments": [{"color": color, "blocks": blocks}]}
+    # the header is the top-level text: Slack shows it above the colored bar, like Bugsnag does
+    return {"text": " ".join(header), "attachments": [{"color": color, "blocks": blocks}]}
 ```
 
 Then replace the body of `slack_backend_send_alert` from `issue = Issue.objects.get(...)` up to (not including) the `try:` with:
@@ -673,7 +683,7 @@ class TestSlackInteractivity(DjangoTestCase):
         response_url, body = respond.delay.call_args.args
         self.assertEqual(response_url, "https://hooks.slack.com/actions/T1/2/3")
         self.assertTrue(body["replace_original"])
-        self.assertIn("*Marked as fixed*", section_texts(body)[1])
+        self.assertIn("*Marked as fixed*", section_texts(body)[0])
         self.assertEqual(body["attachments"][0]["color"], SLACK_GREEN)
         self.assertNotIn("actions", [b["type"] for b in body["attachments"][0]["blocks"]])
 

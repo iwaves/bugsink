@@ -26,9 +26,10 @@ all three `bugsink/conf_templates/*.py.template` (docker needs this: it only kno
 
 ### Message builder (`alerts/service_backends/slack.py`)
 `build_alert_message(issue, environment, state_description, unmute_reason=None, buttons=False, color=RED)` returns the JSON
-payload: top-level `text` (notification fallback) plus one attachment `{color, blocks}`:
+payload: top-level `text` (the header line below; Slack renders it above the colored bar, like Bugsnag) plus one
+attachment `{color, blocks}` holding the rest:
 
-* header line (mrkdwn): `Event in {environment} from {project} in {transaction} (<url|details>)`; empty parts omitted
+* top-level `text` (mrkdwn): `Event in {environment} from {project} in {transaction} (<url|details>)`; empty parts omitted
 * `state_description` ("New issue" / "Regression" / "Unmuted issue"), plus `unmute_reason` when given
 * `issue.title()` as a mrkdwn section (not cut at 150 chars)
 * `Location`: `last_frame_filename - last_frame_module.last_frame_function` from the issue's denormalized columns; omitted when
