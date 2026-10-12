@@ -1,7 +1,5 @@
 # Slack app alerts Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers-extended-cc:subagent-driven-development (recommended) or superpowers-extended-cc:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
-
 **Goal:** Bugsnag-style Slack alert messages for both Slack backends, plus a new `slack_app` backend (bot token, per-project channel, Mark as fixed / Snooze 1hr / Ignore buttons).
 
 **Architecture:** One shared message builder in `alerts/service_backends/slack.py` used by the webhook backend and the new `alerts/service_backends/slack_app.py`. Bot token and signing secret are installation-wide settings. A public, signature-verified view applies button clicks through the existing `apply_issue_action(..., user=None)` and updates the Slack message through a snappea task that POSTs to Slack's `response_url`.
