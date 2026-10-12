@@ -22,7 +22,7 @@ def verify_slack_signature(secret, timestamp, body, signature):
         return False
 
     try:
-        age = time.time() - int(timestamp)
+        age = int(time.time()) - int(timestamp)
     except ValueError:
         return False
     if abs(age) > MAX_SIGNATURE_AGE:

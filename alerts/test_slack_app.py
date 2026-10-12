@@ -205,5 +205,14 @@ class TestVerifySlackSignature(DjangoTestCase):
     def test_missing_or_garbled_headers(self):
         self.assertFalse(verify_slack_signature(SECRET, None, self.body, None))
         self.assertFalse(verify_slack_signature(SECRET, "not-a-number", self.body, "v0=abc"))
+        self.assertFalse(verify_slack_signature(SECRET, "9" * 400, self.body, "v0=abc"))
         timestamp, _ = sign(self.body)
         self.assertFalse(verify_slack_signature(SECRET, timestamp, self.body, "v0=é"))
+
+    def test_future_timestamp(self):
+        timestamp, signature = sign(self.body, timestamp=int(time.time()) + 301)
+        self.assertFalse(verify_slack_signature(SECRET, timestamp, self.body, signature))
+
+    def test_timestamp_inside_window(self):
+        timestamp, signature = sign(self.body, timestamp=int(time.time()) - 299)
+        self.assertTrue(verify_slack_signature(SECRET, timestamp, self.body, signature))
