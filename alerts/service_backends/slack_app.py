@@ -1,4 +1,7 @@
+import hashlib
+import hmac
 import json
+import time
 import requests
 
 from django import forms
@@ -10,6 +13,23 @@ from issues.models import Issue
 from .slack import _escape, _store_failure_info, _store_success_info, build_alert_message, latest_environment
 
 POST_MESSAGE_URL = "https://slack.com/api/chat.postMessage"
+MAX_SIGNATURE_AGE = 5 * 60
+
+
+def verify_slack_signature(secret, timestamp, body, signature):
+    # https://api.slack.com/authentication/verifying-requests-from-slack
+    if not secret or not timestamp or not signature:
+        return False
+
+    try:
+        age = time.time() - int(timestamp)
+    except ValueError:
+        return False
+    if abs(age) > MAX_SIGNATURE_AGE:
+        return False
+
+    digest = hmac.new(secret.encode(), f"v0:{timestamp}:".encode() + body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(f"v0={digest}".encode(), signature.encode())
 
 
 class SlackAPIError(Exception):

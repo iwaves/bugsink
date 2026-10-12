@@ -1,4 +1,7 @@
+import hashlib
+import hmac
 import json
+import time
 from unittest.mock import Mock, patch
 
 from django.test import TestCase as DjangoTestCase
@@ -11,7 +14,7 @@ from projects.models import Project
 
 from .models import MessagingServiceConfig
 from .service_backends.slack import SLACK_RED, build_alert_message, slack_backend_send_alert
-from .service_backends.slack_app import SlackAppConfigForm
+from .service_backends.slack_app import SlackAppConfigForm, verify_slack_signature
 
 
 class TestSettings(DjangoTestCase):
@@ -165,3 +168,42 @@ class TestSlackAppSending(DjangoTestCase):
 
         self.assertEqual(mock_post.call_args.kwargs["json"]["channel"], "#errors")
         self.assertIn("Test message by Bugsink", mock_post.call_args.kwargs["json"]["text"])
+
+
+SECRET = "signing-secret"
+
+
+def sign(body, secret=SECRET, timestamp=None):
+    timestamp = str(int(time.time())) if timestamp is None else str(timestamp)
+    digest = hmac.new(secret.encode(), f"v0:{timestamp}:".encode() + body, hashlib.sha256).hexdigest()
+    return timestamp, "v0=" + digest
+
+
+class TestVerifySlackSignature(DjangoTestCase):
+    body = b"payload=%7B%7D"
+
+    def test_valid(self):
+        timestamp, signature = sign(self.body)
+        self.assertTrue(verify_slack_signature(SECRET, timestamp, self.body, signature))
+
+    def test_wrong_secret(self):
+        timestamp, signature = sign(self.body, secret="other")
+        self.assertFalse(verify_slack_signature(SECRET, timestamp, self.body, signature))
+
+    def test_tampered_body(self):
+        timestamp, signature = sign(self.body)
+        self.assertFalse(verify_slack_signature(SECRET, timestamp, self.body + b"x", signature))
+
+    def test_stale_timestamp(self):
+        timestamp, signature = sign(self.body, timestamp=int(time.time()) - 301)
+        self.assertFalse(verify_slack_signature(SECRET, timestamp, self.body, signature))
+
+    def test_unset_secret_never_verifies(self):
+        timestamp, signature = sign(self.body, secret="")
+        self.assertFalse(verify_slack_signature("", timestamp, self.body, signature))
+
+    def test_missing_or_garbled_headers(self):
+        self.assertFalse(verify_slack_signature(SECRET, None, self.body, None))
+        self.assertFalse(verify_slack_signature(SECRET, "not-a-number", self.body, "v0=abc"))
+        timestamp, _ = sign(self.body)
+        self.assertFalse(verify_slack_signature(SECRET, timestamp, self.body, "v0=é"))
