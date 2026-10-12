@@ -49,6 +49,58 @@ def _safe_markdown(text):
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("*", "\\*").replace("_", "\\_")
 
 
+SLACK_RED = "#e01e5a"
+SLACK_GREEN = "#2eb67d"
+
+# action_id -> button label; the click endpoint (alerts/views.py) maps the same ids to issue actions
+SLACK_BUTTONS = {"resolve": "Mark as fixed", "snooze": "Snooze 1hr", "ignore": "Ignore"}
+
+
+def _escape(text):
+    # the only characters Slack requires escaping in mrkdwn text
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _mrkdwn(text):
+    return {"type": "section", "text": {"type": "mrkdwn", "text": text}}
+
+
+def latest_environment(issue):
+    event = issue.event_set.order_by("-digest_order").first()
+    return event.environment if event else ""
+
+
+def build_alert_message(issue, environment, state_description, unmute_reason=None, buttons=False, color=SLACK_RED):
+    issue_url = get_settings().BASE_URL + issue.get_absolute_url()
+
+    header = ["Event"]
+    if environment:
+        header.append(f"in {_escape(environment)}")
+    header.append(f"from {_escape(issue.project.name)}")
+    if issue.transaction:
+        header.append(f"in {_escape(issue.transaction)}")
+    header.append(f"(<{issue_url}|details>)")
+
+    blocks = [_mrkdwn(" ".join(header)), _mrkdwn(f"*{_escape(state_description)}*\n{_escape(issue.title())}")]
+
+    if unmute_reason:
+        blocks.append(_mrkdwn(unmute_reason))
+
+    if issue.last_frame_filename:
+        function = ".".join(filter(None, [issue.last_frame_module, issue.last_frame_function]))
+        location = issue.last_frame_filename + (f" - {function}" if function else "")
+        blocks.append(_mrkdwn(f"*Location*\n{_escape(location)}"))
+
+    if buttons:
+        blocks.append({"type": "actions", "elements": [
+            {"type": "button", "text": {"type": "plain_text", "text": label}, "action_id": action_id,
+             "value": str(issue.id)}
+            for action_id, label in SLACK_BUTTONS.items()
+        ]})
+
+    return {"text": truncatechars(issue.title(), 150), "attachments": [{"color": color, "blocks": blocks}]}
+
+
 def _store_failure_info(service_config_id, exception, response=None):
     """Store failure information in the MessagingServiceConfig with immediate_atomic"""
     from alerts.models import MessagingServiceConfig
@@ -156,68 +208,7 @@ def slack_backend_send_alert(
         webhook_url, issue_id, state_description, alert_article, alert_reason, service_config_id, unmute_reason=None):
 
     issue = Issue.objects.get(id=issue_id)
-
-    issue_url = get_settings().BASE_URL + issue.get_absolute_url()
-    title = truncatechars(issue.title().replace("|", ""), 150)
-    link = f"<{issue_url}|view on Bugsink>"
-
-    sections = [
-                {
-                    "type": "header",
-                    "text": {
-                        "type": "plain_text",
-                        "text": title,
-                    },
-                },
-                {
-                    "type": "section",
-                    "text": {
-                        "type": "plain_text",
-                        "text": f"{alert_reason} issue",
-                    },
-                },
-               ]
-
-    if unmute_reason:
-        sections.append({
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": unmute_reason,
-            },
-        })
-
-    # assumption: visavis email, project.name is of less importance, because in slack-like things you may (though not
-    # always) do one-channel per project. more so for site_title (if you have multiple Bugsinks, you'll surely have
-    # multiple slack channels)
-    fields = {
-        "project": issue.project.name
-    }
-
-    # left as a (possible) TODO, because the amount of refactoring (passing event to this function) is too big for now
-    # if event.release:
-    #     fields["release"] = event.release
-    # if event.environment:
-    #     fields["environment"] = event.environment
-
-    sections += [{"type": "section",
-                  "fields": [
-                        {
-                            "type": "mrkdwn",
-                            "text": f"*{field}*: " + _safe_markdown(value),
-                        } for field, value in fields.items()
-                    ]}]
-
-    sections += [{
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": link,
-                    },
-                }]
-
-    # slack service-backend also support mattermost; mattermost requires at least one text field; use the first section
-    data = {"text": sections[0]["text"]["text"], "blocks": sections}
+    data = build_alert_message(issue, latest_environment(issue), state_description, unmute_reason)
 
     try:
         result = SlackBackend.safe_post(
