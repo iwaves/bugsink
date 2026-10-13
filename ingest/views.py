@@ -4,7 +4,7 @@ import uuid
 import hashlib
 import os
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import jsonschema
 import fastjsonschema
@@ -40,7 +40,8 @@ from events.models import Event
 from events.retention import evict_for_max_events, should_evict, EvictionCounts
 from events.usage import record_event_counts
 from releases.models import create_release_if_needed
-from alerts.tasks import send_new_issue_alert, send_regression_alert
+from alerts.models import effective_repeat_timeout
+from alerts.tasks import send_new_issue_alert, send_regression_alert, send_repeat_alert
 from compat.timestamp import format_timestamp, parse_timestamp
 from tags.models import digest_tags
 from bsmain.utils import b108_makedirs
@@ -576,6 +577,7 @@ class BaseIngestAPIView(View):
 
             if project.alert_on_new_issue:
                 delay_on_commit(send_new_issue_alert, str(issue.id))
+                issue.last_alerted_at = digested_at
 
         else:
             # new issues cannot be regressions by definition, hence this is in the 'else' branch
@@ -588,6 +590,7 @@ class BaseIngestAPIView(View):
 
                 if project.alert_on_regression:
                     delay_on_commit(send_regression_alert, str(issue.id))
+                    issue.last_alerted_at = digested_at
 
                 IssueStateManager.reopen(issue)
 
@@ -606,6 +609,13 @@ class BaseIngestAPIView(View):
                 IssueStateManager.unmute(
                     issue, triggering_event=event,
                     unmute_metadata={"mute_for": {"unmute_after": issue.unmute_after}})
+
+            # last, so that an event that just triggered one of the alerts above cannot trigger a repeat as well
+            if issue.last_alerted_at is not None and not issue.is_resolved and not issue.is_muted:
+                timeout = effective_repeat_timeout(issue, project)
+                if timeout and digested_at - issue.last_alerted_at >= timedelta(seconds=timeout):
+                    delay_on_commit(send_repeat_alert, str(issue.id))
+                    issue.last_alerted_at = digested_at
 
         cls.count_issue_periods_and_act_on_it(issue, event, digested_at)
 

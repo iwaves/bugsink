@@ -463,6 +463,39 @@ class ViewTests(TransactionTestCase):
         self.assertEqual("last_seen", response.context["sort"])
         self.assertEqual([self.issue.id, other_issue.id], [issue.id for issue in response.context["page_obj"]])
 
+    def test_issue_alert_repeat_timeout_can_be_set_and_cleared(self):
+        url = f"/issues/issue/{self.issue.id}/event/{self.event.id}/"
+
+        response = self.client.post(url, {"alert_repeat_timeout": "120"})
+        self.assertEqual(302, response.status_code)
+        self.issue.refresh_from_db()
+        self.assertEqual(120, self.issue.alert_repeat_timeout)
+
+        self.client.post(url, {"alert_repeat_timeout": "0"})
+        self.issue.refresh_from_db()
+        self.assertEqual(0, self.issue.alert_repeat_timeout)
+
+        self.client.post(url, {"alert_repeat_timeout": ""})
+        self.issue.refresh_from_db()
+        self.assertIsNone(self.issue.alert_repeat_timeout)
+
+    def test_issue_alert_repeat_timeout_ignores_invalid_values(self):
+        url = f"/issues/issue/{self.issue.id}/event/{self.event.id}/"
+        Issue.objects.filter(id=self.issue.id).update(alert_repeat_timeout=120)
+
+        for value in ["-1", "abc", "1.5"]:
+            self.client.post(url, {"alert_repeat_timeout": value})
+
+        self.issue.refresh_from_db()
+        self.assertEqual(120, self.issue.alert_repeat_timeout)
+
+    def test_issue_page_shows_alert_repeat_timeout(self):
+        Issue.objects.filter(id=self.issue.id).update(alert_repeat_timeout=120)
+
+        response = self.client.get(f"/issues/issue/{self.issue.id}/event/{self.event.id}/")
+
+        self.assertContains(response, 'name="alert_repeat_timeout" value="120"')
+
     def test_pending_project_membership_cannot_view_issue_list(self):
         pending_user = User.objects.create_user(username='pending', password='test')
         ProjectMembership.objects.create(project=self.project, user=pending_user, accepted=False)

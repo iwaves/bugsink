@@ -1,15 +1,20 @@
 import json
 
+from django.contrib import messages
+from django.contrib.auth.decorators import user_passes_test
 from django.http import HttpResponse, HttpResponseBadRequest, HttpResponseForbidden
-from django.shortcuts import render
+from django.shortcuts import redirect, render
+from django.utils.translation import gettext as _
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
 
 from bugsink.app_settings import get_settings
-from bugsink.decorators import login_exempt
+from bugsink.decorators import atomic_for_request_method, login_exempt
 from bugsink.transaction import immediate_atomic
 from issues.models import Issue, IssueStateManager, apply_issue_action, is_valid_issue_action
 
+from .forms import AlertSettingsForm
+from .models import AlertSettings
 from .service_backends.slack import SLACK_GREEN, build_alert_message, latest_environment
 from .service_backends.slack_app import slack_app_respond, verify_slack_signature
 
@@ -77,3 +82,20 @@ def slack_interactivity(request):
 
     slack_app_respond.delay(payload["response_url"], reply)
     return HttpResponse()
+
+
+@atomic_for_request_method
+@user_passes_test(lambda u: u.is_superuser)
+def alert_settings(request):
+    if request.method == "POST":
+        form = AlertSettingsForm(request.POST, instance=AlertSettings.get())
+
+        if form.is_valid():
+            form.save()
+            messages.success(request, _("Alert settings saved."))
+            return redirect("alert_settings")
+
+    else:
+        form = AlertSettingsForm(instance=AlertSettings.get())
+
+    return render(request, "alerts/alert_settings.html", {"form": form})

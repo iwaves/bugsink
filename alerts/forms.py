@@ -1,6 +1,6 @@
 from django.forms import ModelForm
 
-from .models import MessagingServiceConfig
+from .models import AlertSettings, MessagingServiceConfig
 
 
 class MessagingServiceConfigNewForm(ModelForm):
@@ -29,3 +29,10 @@ class MessagingServiceConfigEditForm(ModelForm):
     class Meta:
         model = MessagingServiceConfig
         fields = ["display_name"]
+
+
+class AlertSettingsForm(ModelForm):
+
+    class Meta:
+        model = AlertSettings
+        fields = ["repeat_timeout"]

@@ -112,6 +112,10 @@ class Project(models.Model):
     alert_on_new_issue = models.BooleanField(default=True)
     alert_on_regression = models.BooleanField(default=True)
     alert_on_unmute = models.BooleanField(default=True)
+    alert_repeat_timeout = models.PositiveIntegerField(
+        _("Alert repeat timeout (seconds)"), null=True, blank=True,
+        help_text=_("Seconds before an open, unmuted issue that occurs again is alerted again. "
+                    "Empty: use the global value. 0: never."))
 
     # visibility
     visibility = models.IntegerField(

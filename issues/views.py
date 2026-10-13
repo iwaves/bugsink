@@ -34,7 +34,7 @@ from theme.templatetags.issues import timestamp_with_millis
 from .models import (
     Issue, IssueQuerysetStateManager, IssueStateManager, TurningPoint, TurningPointKind,
     apply_issue_action, is_valid_issue_action, q_for_invalid_issue_action)
-from .forms import CommentForm
+from .forms import AlertRepeatTimeoutForm, CommentForm
 from .utils import get_values, get_main_exception
 from events.utils import (
     annotate_with_meta,
@@ -325,6 +325,13 @@ def event_by_id(request, event_pk):
 
 
 def _handle_post(request, issue):
+    if "alert_repeat_timeout" in request.POST:
+        form = AlertRepeatTimeoutForm(request.POST)
+        if form.is_valid():  # invalid input is ignored, as for invalid actions below
+            issue.alert_repeat_timeout = form.cleaned_data["alert_repeat_timeout"]
+            issue.save()
+        return HttpResponseRedirect(request.path)
+
     if is_valid_issue_action(request.POST["action"], issue):
         apply_issue_action(IssueStateManager, issue, request.POST["action"], request.user)
         issue.save()

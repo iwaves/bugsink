@@ -1,4 +1,4 @@
-from django.forms import ModelForm
+from django.forms import Form, IntegerField, ModelForm
 
 from .models import TurningPoint
 
@@ -9,6 +9,10 @@ class CommentForm(ModelForm):
     class Meta:
         model = TurningPoint
         fields = ['comment']
+
+
+class AlertRepeatTimeoutForm(Form):
+    alert_repeat_timeout = IntegerField(min_value=0, required=False)
 
 
 class IssueAdminForm(ModelForm):

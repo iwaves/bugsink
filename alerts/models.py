@@ -84,3 +84,22 @@ class MessagingServiceConfig(models.Model):
     def has_recent_failure(self):
         """Check if this config has a recent failure"""
         return self.last_failure_timestamp is not None
+
+
+class AlertSettings(models.Model):
+    """Installation-wide alert settings: a single row (pk=1), edited by superusers."""
+
+    repeat_timeout = models.PositiveIntegerField(
+        default=3600, help_text="Seconds before an open, unmuted issue that occurs again is alerted again. 0: never.")
+
+    @classmethod
+    def get(cls):
+        return cls.objects.get_or_create(pk=1)[0]
+
+
+def effective_repeat_timeout(issue, project):
+    """Issue, then project, then global; None means "inherit", 0 means "never repeat"."""
+    for value in (issue.alert_repeat_timeout, project.alert_repeat_timeout):
+        if value is not None:
+            return value
+    return AlertSettings.get().repeat_timeout

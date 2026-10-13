@@ -356,6 +356,40 @@ class ProjectFormTestCase(TransactionTestCase):
         self.assertEqual(saved.slug, "original-slug")
         self.assertEqual(saved.name, "Renamed")
 
+    def test_alert_repeat_timeout_is_optional(self):
+        project = Project.objects.create(name="Original Name")
+        data = {
+            "name": "Original Name",
+            "visibility": ProjectVisibility.JOINABLE,
+            "retention_max_event_count": 10000,
+            "grouping_mechanism": project.grouping_mechanism,
+        }
+
+        form = ProjectForm(data={**data, "alert_repeat_timeout": "120"}, instance=project)
+        self.assertTrue(form.is_valid(), form.errors)
+        self.assertEqual(120, form.save().alert_repeat_timeout)
+
+        form = ProjectForm(data={**data, "alert_repeat_timeout": ""}, instance=project)
+        self.assertTrue(form.is_valid(), form.errors)
+        self.assertIsNone(form.save().alert_repeat_timeout)
+
+    def test_alert_repeat_timeout_rejects_negative(self):
+        project = Project.objects.create(name="Original Name")
+
+        form = ProjectForm(
+            data={
+                "name": "Original Name",
+                "visibility": ProjectVisibility.JOINABLE,
+                "retention_max_event_count": 10000,
+                "grouping_mechanism": project.grouping_mechanism,
+                "alert_repeat_timeout": "-1",
+            },
+            instance=project,
+        )
+
+        self.assertFalse(form.is_valid())
+        self.assertIn("alert_repeat_timeout", form.errors)
+
     def test_same_project_name_is_allowed_in_another_team(self):
         team_a = Team.objects.create(name="Team A")
         team_b = Team.objects.create(name="Team B")
