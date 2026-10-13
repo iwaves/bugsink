@@ -137,6 +137,25 @@ class ProjectApiTests(TransactionTestCase):
         self.assertEqual(body["name"], "New")
         self.assertFalse(body["alert_on_unmute"])
 
+    def test_patch_alert_repeat_timeout(self):
+        p = Project.objects.create(team=self.team, name="Old")
+        url = reverse("api:project-detail", args=[p.id])
+
+        r = self.client.patch(url, {"alert_repeat_timeout": 120}, format="json")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["alert_repeat_timeout"], 120)
+
+        r = self.client.patch(url, {"alert_repeat_timeout": None}, format="json")
+        self.assertEqual(r.status_code, 200)
+        self.assertIsNone(r.json()["alert_repeat_timeout"])
+
+    def test_create_with_alert_repeat_timeout(self):
+        r = self.client.post(
+            reverse("api:project-list"), {"team": str(self.team.id), "name": "Core", "alert_repeat_timeout": 0},
+            format="json")
+        self.assertEqual(r.status_code, 201)
+        self.assertEqual(r.json()["alert_repeat_timeout"], 0)
+
     def test_patch_rejects_duplicate_name_in_team(self):
         Project.objects.create(team=self.team, name="Backend")
         project = Project.objects.create(team=self.team, name="Frontend")

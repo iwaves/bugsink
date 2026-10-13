@@ -63,6 +63,11 @@ def send_regression_alert(issue_id):
 
 
 @shared_task
+def send_repeat_alert(issue_id):
+    _send_alert(issue_id, "Recurring issue", "a", "RECURRING")
+
+
+@shared_task
 def send_unmute_alert(issue_id, unmute_reason):
     _send_alert(issue_id, "Unmuted issue", "an", "UNMUTED", unmute_reason=unmute_reason)
 

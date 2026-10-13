@@ -77,6 +77,10 @@ class Issue(models.Model):
     unmute_after = models.DateTimeField(blank=True, null=True)
     next_unmute_check = models.PositiveIntegerField(null=False, default=0)
 
+    # fields related to repeat alerts:
+    alert_repeat_timeout = models.PositiveIntegerField(null=True, blank=True)  # seconds; None: use the project's
+    last_alerted_at = models.DateTimeField(null=True, blank=True)  # None: never alerted, hence nothing to repeat
+
     def save(self, *args, **kwargs):
         if self.digest_order is None:
             # testing-only; in production this should never happen and instead have been done in the ingest view.
@@ -428,6 +432,9 @@ class IssueStateManager(object):
                     transaction.on_commit(partial(
                         send_unmute_alert.delay,
                         str(issue.id), format_unmute_reason(unmute_metadata)))
+                    # on the in-memory event of digest_event, ingested_at is still the string it was created from
+                    alerted_at = triggering_event.ingested_at
+                    issue.last_alerted_at = parse_timestamp(alerted_at) if isinstance(alerted_at, str) else alerted_at
 
                 # this is in a funny place but it's still simpler than introducing an Encoder
                 if unmute_metadata is not None and "mute_for" in unmute_metadata:

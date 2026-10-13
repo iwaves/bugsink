@@ -158,7 +158,8 @@ class ProjectForm(forms.ModelForm):
     class Meta:
         model = Project
 
-        fields = ["team", "name", "visibility", "retention_max_event_count", "grouping_mechanism"]
+        fields = [
+            "team", "name", "visibility", "retention_max_event_count", "alert_repeat_timeout", "grouping_mechanism"]
         # slug is shown read-only via an explicit (declared) field for edit; creation auto-generates it on the model.
         # If we ever make slug editable, we'd want JS like django/contrib/admin/static/admin/js/prepopulate.js.
 

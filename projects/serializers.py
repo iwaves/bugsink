@@ -33,6 +33,7 @@ class ProjectListSerializer(UTCModelSerializer):
             "alert_on_new_issue",
             "alert_on_regression",
             "alert_on_unmute",
+            "alert_repeat_timeout",
             "visibility",
             "retention_max_event_count",
             "grouping_mechanism",
@@ -57,6 +58,7 @@ class ProjectDetailSerializer(ExpandableSerializerMixin, UTCModelSerializer):
             "alert_on_new_issue",
             "alert_on_regression",
             "alert_on_unmute",
+            "alert_repeat_timeout",
             "visibility",
             "retention_max_event_count",
             "grouping_mechanism",
@@ -79,6 +81,7 @@ class ProjectCreateSerializer(UTCModelSerializer):
             "alert_on_new_issue",
             "alert_on_regression",
             "alert_on_unmute",
+            "alert_repeat_timeout",
             "retention_max_event_count",
             # "slug", auto-generated for uniqueness
             # "is_deleted", must go through delete_deferred()

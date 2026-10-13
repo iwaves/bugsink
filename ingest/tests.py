@@ -37,11 +37,13 @@ from issues.grouping_mechanisms import (
 from issues.models import IssueStateManager, Issue, TurningPoint, TurningPointKind, Grouping
 from issues.utils import get_values
 from bugsink.app_settings import override_settings
+from alerts.models import AlertSettings
 from bugsink.streams import UnclosableBytesIO
 from compat.timestamp import format_timestamp
 from compat.dsn import get_header_value
 from bsmain.management.commands.send_json import Command as SendJsonCommand
 from phonehome.models import Installation
+from releases.models import Release
 
 from .views import BaseIngestAPIView, IngestSecurityAPIView, MinidumpAPIView, get_grouping_key_hash
 from .parsers import readuntil, NewlineFinder, ParseError, LengthFinder, StreamingEnvelopeParser
@@ -2241,3 +2243,160 @@ BROTLI_BOMB_4G = (
     b"\x00qX\x00\xa0{\xff\xc7\xff\xff?\xf8'\x00\xe2\xb0\x00@\xf7\xfe\x8f\xff\xff\x7f\xf0O\x00\xc4a\x01\x80\xee\xfd"
     b"\x1f\xff\xff\xff\xe0\x9f\x00\x88\xc3\x02\x00\xdd\xfb\xbf\xc0\x04\xc0?\x01\x10\x82\x05"
     b"\x00\x13")
+
+
+class IngestRepeatAlertTestCase(TransactionTestCase):
+    T0 = datetime.datetime(2026, 1, 1, 12, 0, tzinfo=datetime.timezone.utc)
+
+    def setUp(self):
+        super().setUp()
+        self.request_factory = RequestFactory()
+        self.project = Project.objects.create(name="loud")
+
+        self.new_alert = self._patch("ingest.views.send_new_issue_alert")
+        self.regression_alert = self._patch("ingest.views.send_regression_alert")
+        self.unmute_alert = self._patch("issues.models.send_unmute_alert")
+        self.repeat_alert = self._patch("ingest.views.send_repeat_alert")
+
+    def _patch(self, target):
+        patcher = patch(target)
+        self.addCleanup(patcher.stop)
+        return patcher.start()
+
+    def digest(self, seconds, project=None, release=None):
+        project = project or self.project
+        request = self.request_factory.post("/api/1/store/")
+        now = self.T0 + datetime.timedelta(seconds=seconds)
+        event_data = create_event_data()
+        if release is not None:
+            event_data["release"] = release
+        BaseIngestAPIView().digest_event(**_digest_params(event_data, project, request, now=now))
+        return Issue.objects.get(project=project)
+
+    def test_new_issue_alert_stamps_last_alerted_at(self):
+        self.assertEqual(self.T0, self.digest(0).last_alerted_at)
+
+    def test_no_stamp_when_new_issue_alert_is_off(self):
+        quiet = Project.objects.create(name="quiet", alert_on_new_issue=False)
+
+        self.assertIsNone(self.digest(0, quiet).last_alerted_at)
+
+        self.digest(7200, quiet)
+        self.assertFalse(self.repeat_alert.delay.called)
+
+    def test_repeat_after_timeout(self):
+        self.digest(0)
+        issue = self.digest(3600)
+
+        self.repeat_alert.delay.assert_called_once_with(str(issue.id))
+        self.assertEqual(self.T0 + datetime.timedelta(seconds=3600), issue.last_alerted_at)
+
+    def test_no_repeat_within_timeout(self):
+        self.digest(0)
+        issue = self.digest(3599)
+
+        self.assertFalse(self.repeat_alert.delay.called)
+        self.assertEqual(self.T0, issue.last_alerted_at)
+
+    def test_timeout_counts_from_the_last_alert(self):
+        self.digest(0)
+        self.digest(3600)
+        self.digest(3601)
+        self.assertEqual(1, self.repeat_alert.delay.call_count)
+
+        self.digest(7200)
+        self.assertEqual(2, self.repeat_alert.delay.call_count)
+
+    def test_burst_after_timeout_queues_one_repeat(self):
+        self.digest(0)
+        self.digest(3600)
+        self.digest(3600)
+        self.digest(3600)
+
+        self.assertEqual(1, self.repeat_alert.delay.call_count)
+
+    def test_global_timeout_from_db(self):
+        AlertSettings.objects.update_or_create(pk=1, defaults={"repeat_timeout": 60})
+        self.digest(0)
+        self.digest(60)
+
+        self.assertEqual(1, self.repeat_alert.delay.call_count)
+
+    def test_project_timeout_overrides_global(self):
+        self.project.alert_repeat_timeout = 60
+        self.project.save()
+        self.digest(0)
+        self.digest(60)
+
+        self.assertEqual(1, self.repeat_alert.delay.call_count)
+
+    def test_issue_timeout_overrides_project(self):
+        self.project.alert_repeat_timeout = 60
+        self.project.save()
+        issue = self.digest(0)
+        issue.alert_repeat_timeout = 600
+        issue.save()
+
+        self.digest(60)
+        self.assertFalse(self.repeat_alert.delay.called)
+
+        self.digest(600)
+        self.assertEqual(1, self.repeat_alert.delay.call_count)
+
+    def test_zero_timeout_never_repeats(self):
+        self.project.alert_repeat_timeout = 0
+        self.project.save()
+        self.digest(0)
+        self.digest(10 ** 7)
+
+        self.assertFalse(self.repeat_alert.delay.called)
+
+    def test_muted_issue_does_not_repeat(self):
+        issue = self.digest(0)
+        IssueStateManager.mute(issue)
+        issue.save()
+
+        self.digest(3600)
+
+        self.assertFalse(self.repeat_alert.delay.called)
+
+    def test_resolved_issue_does_not_repeat(self):
+        issue = self.digest(0, release="1")
+        Release.objects.create(project=self.project, version="2", date_released=self.T0 + datetime.timedelta(days=1))
+        issue.is_resolved = True
+        issue.add_fixed_at("2")
+        issue.save()
+
+        self.digest(3600, release="1")  # an event from before the fix: not a regression, the issue stays resolved
+
+        self.assertFalse(self.regression_alert.delay.called)
+        self.assertFalse(self.repeat_alert.delay.called)
+
+    def test_never_alerted_issue_does_not_repeat(self):
+        get_or_create_issue(self.project)
+
+        self.digest(10 ** 7)
+
+        self.assertFalse(self.repeat_alert.delay.called)
+
+    def test_regression_alert_stamps_and_does_not_also_repeat(self):
+        issue = self.digest(0)
+        issue.is_resolved = True
+        issue.save()
+
+        issue = self.digest(3600)
+
+        self.assertTrue(self.regression_alert.delay.called)
+        self.assertFalse(self.repeat_alert.delay.called)
+        self.assertEqual(self.T0 + datetime.timedelta(seconds=3600), issue.last_alerted_at)
+
+    def test_unmute_alert_stamps_and_does_not_also_repeat(self):
+        issue = self.digest(0)
+        IssueStateManager.mute(issue, unmute_after=self.T0 + datetime.timedelta(seconds=10))
+        issue.save()
+
+        issue = self.digest(3600)
+
+        self.assertTrue(self.unmute_alert.delay.called)
+        self.assertFalse(self.repeat_alert.delay.called)
+        self.assertEqual(self.T0 + datetime.timedelta(seconds=3600), issue.last_alerted_at)
