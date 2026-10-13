@@ -179,7 +179,7 @@ def get_denormalized_fields_for_data(parsed_data):
 
     last_frame = get_crash_frame_from_event_data(parsed_data) or {}
 
-    if last_frame.get("filename", "").endswith("/public/index.php"):
+    if maybe_empty(last_frame.get("filename")).endswith("/public/index.php"):
         # PHP: only the front controller is in_app, i.e. the exception came from vendor code; show the innermost frame
         last_frame = get_crash_frame_from_event_data(parsed_data, lambda f: not f.get("in_app")) or last_frame
 

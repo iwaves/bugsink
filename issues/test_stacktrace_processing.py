@@ -59,3 +59,6 @@ class FrontControllerLocationTestCase(TestCase):
 
     def test_front_controller_as_only_frame_is_kept(self):
         self.assertEqual(self.index["filename"], self.last_frame_filename([self.index]))
+
+    def test_null_filename_gives_empty_location(self):
+        self.assertEqual("", self.last_frame_filename([{"filename": None, "in_app": True}]))
