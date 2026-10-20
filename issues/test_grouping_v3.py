@@ -101,7 +101,8 @@ class GroupingV3IngestTestCase(TransactionTestCase):
 
     def create_project(self, **kwargs):
         return Project.objects.create(
-            name="v3", alert_on_new_issue=False, alert_on_regression=False, alert_on_unmute=False, **kwargs)
+            name="v3", alert_on_new_issue=False, alert_on_regression=False, alert_on_unmute=False,
+            **{"grouping_mechanism": BUGSINK_GROUPING_V3, **kwargs})
 
     def test_same_exception_with_different_inner_exceptions_creates_separate_issues(self):
         now = datetime.datetime(2026, 10, 12, 12, 0, tzinfo=datetime.timezone.utc)

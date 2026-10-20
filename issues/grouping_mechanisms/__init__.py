@@ -1,6 +1,6 @@
 from datetime import timedelta
 
-from . import v1, v2, v3
+from . import v1, v2, v3, v4
 from .building_blocks import v1 as building_blocks_v1
 
 
@@ -18,7 +18,8 @@ MECHANISM_INDEPENDENT_GROUPING = "none"
 BUGSINK_GROUPING_V1 = "bugsink-v1"
 BUGSINK_GROUPING_V2 = "bugsink-v2"
 BUGSINK_GROUPING_V3 = "bugsink-v3"
-CURRENT_GROUPING_MECHANISM = BUGSINK_GROUPING_V3
+BUGSINK_GROUPING_V4 = "bugsink-v4"
+CURRENT_GROUPING_MECHANISM = BUGSINK_GROUPING_V4
 
 # I think in general it's a good idea to let legacy display names reflect the history, and have the latest name reflect
 # why it's better than the previous one.
@@ -37,9 +38,15 @@ GROUPING_MECHANISMS = [
     ),
     GroupingMechanism(
         BUGSINK_GROUPING_V3,
-        "Value-normalized, with inner exception types (latest)",
+        "Value-normalized, with inner exception types",
         building_blocks_v1.get_type_and_value_for_data,
         v3.default_issue_grouper,
+    ),
+    GroupingMechanism(
+        BUGSINK_GROUPING_V4,
+        "Root cause type and code location, ignoring the message (latest)",
+        building_blocks_v1.get_type_and_value_for_data,
+        v4.default_issue_grouper,
     ),
 ]
 
