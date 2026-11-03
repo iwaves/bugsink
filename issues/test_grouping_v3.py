@@ -5,7 +5,7 @@ from django.test import TestCase as DjangoTestCase
 from bugsink.test_utils import TransactionTestCase25251 as TransactionTestCase
 from compat.timestamp import format_timestamp
 from events.factories import create_event_data
-from ingest.views import BaseIngestAPIView
+from ingest.tasks import digest_event
 from issues.grouping_mechanisms import BUGSINK_GROUPING_V2, BUGSINK_GROUPING_V3
 from issues.models import Grouping, Issue
 from issues.utils import get_key_with_mechanism_for_data as _get_key_with_mechanism_for_data
@@ -89,7 +89,7 @@ class GroupingV3IngestTestCase(TransactionTestCase):
 
     def digest(self, project, exceptions, now):
         event_data = {**create_event_data(), **exception_event_data(*exceptions)}
-        BaseIngestAPIView().digest_event(
+        digest_event(
             event_metadata={
                 "event_id": event_data["event_id"],
                 "project_id": project.id,

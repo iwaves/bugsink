@@ -1,4 +1,5 @@
 from hashlib import sha1
+from datetime import timedelta
 from uuid import UUID, uuid4
 import json
 import gzip
@@ -11,13 +12,16 @@ import subprocess
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
-from zipfile import ZipFile, ZIP_DEFLATED
+from zipfile import ZipFile, ZIP_BZIP2, ZIP_DEFLATED
 
 from django.test import tag
+from django.test.utils import CaptureQueriesContext
 from django.contrib.auth import get_user_model
 from django.test import LiveServerTestCase, override_settings
+from django.db import connection
 from django.core.management.base import CommandError
 from django.core.management import call_command
+from django.utils import timezone
 from unittest.mock import Mock, patch
 
 from compat.dsn import get_header_value
@@ -33,16 +37,16 @@ from bugsink.streams import MaxLengthExceeded
 from .models import Chunk, File, FileMetadata, get_file_metadata_for_debug_ids
 from .minidump import event_threads_for_process_state
 from .storage_registry import override_object_storages
-from .tasks import assemble_file, create_file_from_local_file
+from .tasks import assemble_file, create_chunk, create_file_from_local_file, process_artifact_bundle, vacuum_files_sync
 from .views import CHUNK_UPLOAD_SIZE
 
 
 User = get_user_model()
 
 
-def get_test_object_storages(basepath, use_for_write):
+def get_test_object_storages(basepath, use_for_write, object_kind="file"):
     return {
-        "file": {
+        object_kind: {
             "local": {
                 "STORAGE": "files.storage.ObjectFileStorage",
                 "OPTIONS": {
@@ -65,6 +69,23 @@ class FilesTests(TransactionTestCase):
         self.client.force_login(self.user)
         self.auth_token = AuthToken.objects.create(debug_files_upload=True)
         self.token_headers = {"Authorization": f"Bearer {self.auth_token.token}"}
+
+    @bugsink_override_settings(API_LOG_UNIMPLEMENTED_CALLS=True)
+    def test_api_catch_all_logs_multipart_upload(self):
+        upload = BytesIO(b"file contents")
+        upload.name = "example.txt"
+        with self.assertLogs("bugsink.api", level="INFO") as logs:
+            response = self.client.post("/api/unimplemented/", {"file": upload, "description": "example"})
+
+        self.assertEqual(404, response.status_code)
+        self.assertIn("POST:   {'description': 'example'}", logs.output[0])
+        self.assertIn("FILES:  ['example.txt']", logs.output[0])
+
+    @bugsink_override_settings(API_LOG_UNIMPLEMENTED_CALLS=True)
+    def test_api_catch_all_rejects_oversized_multipart_upload(self):
+        response = self.client.post("/api/unimplemented/", {"file": BytesIO(b"x" * 1_000_001)})
+
+        self.assertEqual(413, response.status_code)
 
     def test_auth_no_header(self):
         response = self.client.get("/api/0/organizations/anyorg/chunk-upload/", headers={})
@@ -215,7 +236,9 @@ class FilesTests(TransactionTestCase):
     def test_installation_token_can_assemble_for_multiple_projects(self):
         other_project = Project.objects.create(name="Other project")
         checksum = "a" * 40
-        Chunk.objects.create(checksum=checksum, size=0, data=b"")
+        chunk = Chunk.objects.create(checksum=checksum, size=0, data=b"")
+        old = timezone.now() - timedelta(days=2)
+        Chunk.objects.filter(id=chunk.id).update(created_at=old)
 
         with patch("files.views.assemble_artifact_bundle.delay") as delay:
             response = self.client.post(
@@ -231,6 +254,8 @@ class FilesTests(TransactionTestCase):
 
         self.assertEqual(200, response.status_code)
         delay.assert_called_once_with(checksum, [checksum], [self.project.id, other_project.id])
+        chunk.refresh_from_db()
+        self.assertGreater(chunk.created_at, old)
 
     def test_user_bound_token_must_administer_every_artifact_project(self):
         other_project = Project.objects.create(name="Other project")
@@ -369,7 +394,7 @@ class FilesTests(TransactionTestCase):
         data = b"hello world"
         checksum = sha1(data, usedforsecurity=False).hexdigest()
 
-        with tempfile.TemporaryDirectory() as tempdir:
+        with tempfile.TemporaryDirectory() as tempdir, bugsink_override_settings(MAX_FILE_SIZE=len(data)):
             with override_object_storages(get_test_object_storages(tempdir, use_for_write=True)):
                 Chunk.objects.create(checksum=checksum, size=len(data), data=data)
 
@@ -379,6 +404,7 @@ class FilesTests(TransactionTestCase):
                 self.assertEqual("local", file.storage_backend)
                 self.assertEqual(data, file.get_raw_data())
                 self.assertEqual(data, Path(tempdir, checksum).read_bytes())
+                self.assertTrue(Chunk.objects.filter(checksum=checksum).exists())
 
     def test_create_file_from_local_file_does_not_read_existing_file(self):
         checksum = "a" * 40
@@ -408,24 +434,69 @@ class FilesTests(TransactionTestCase):
                 with file.open_for_read() as f:
                     self.assertEqual(data, f.read())
 
-    def test_assemble_file_enforces_max_file_size(self):
+    def test_assemble_file_rejects_oversized_file_before_loading_chunks(self):
+        # LLM-generated; not deeply inspected, but it does seem to cover the main case we care about.
         chunk_a = b"hello "
         chunk_b = b"world"
-        checksum = sha1(chunk_a + chunk_b, usedforsecurity=False).hexdigest()
+        checksum = sha1(chunk_a + chunk_b + chunk_a, usedforsecurity=False).hexdigest()
 
         Chunk.objects.create(checksum=sha1(chunk_a, usedforsecurity=False).hexdigest(), size=len(chunk_a), data=chunk_a)
         Chunk.objects.create(checksum=sha1(chunk_b, usedforsecurity=False).hexdigest(), size=len(chunk_b), data=chunk_b)
 
-        with bugsink_override_settings(MAX_FILE_SIZE=len(chunk_a + chunk_b) - 1):
-            with self.assertRaisesMessage(ValueError, "MAX_FILE_SIZE"):
-                assemble_file(
-                    checksum,
-                    [
-                        sha1(chunk_a, usedforsecurity=False).hexdigest(),
-                        sha1(chunk_b, usedforsecurity=False).hexdigest(),
-                    ],
-                    filename="hello.txt",
-                )
+        with bugsink_override_settings(MAX_FILE_SIZE=len(chunk_a + chunk_b + chunk_a) - 1):
+            with CaptureQueriesContext(connection) as queries:
+                with self.assertRaisesMessage(ValueError, "MAX_FILE_SIZE"):
+                    assemble_file(
+                        checksum,
+                        [
+                            sha1(chunk_a, usedforsecurity=False).hexdigest(),
+                            sha1(chunk_b, usedforsecurity=False).hexdigest(),
+                            sha1(chunk_a, usedforsecurity=False).hexdigest(),
+                        ],
+                        filename="hello.txt",
+                    )
+
+        # Reject based on stored sizes; selecting the chunk contents would already allocate too much memory.
+        data_column = f'{connection.ops.quote_name("files_chunk")}.{connection.ops.quote_name("data")}'
+        for query in queries:
+            self.assertNotIn(data_column, query["sql"])
+
+    def test_artifact_bundle_rejects_bzip2_manifest(self):
+        bundle = BytesIO()
+        with ZipFile(bundle, "w", compression=ZIP_BZIP2) as zf:
+            zf.writestr("manifest.json", b'{"files": {}}')
+
+        data = bundle.getvalue()
+        checksum = sha1(data, usedforsecurity=False).hexdigest()
+        Chunk.objects.create(checksum=checksum, size=len(data), data=data)
+
+        with self.assertRaisesMessage(NotImplementedError, "Unsupported ZIP compression method"):
+            process_artifact_bundle(checksum, [checksum], [self.project.id])
+
+    def test_artifact_bundle_rejects_oversized_manifest(self):
+        bundle = BytesIO()
+        with ZipFile(bundle, "w", compression=ZIP_DEFLATED) as zf:
+            with zf.open("manifest.json", "w") as manifest:
+                manifest.write(b'{"files": {}, "padding": "')
+                for _ in range(100):
+                    manifest.write(b"x" * (1024 * 1024))
+                manifest.write(b'"}')
+
+        data = bundle.getvalue()
+        self.assertLess(len(data), 1024 * 1024)  # A small upload that expands to over 100 MiB of valid JSON.
+        checksum = sha1(data, usedforsecurity=False).hexdigest()
+        Chunk.objects.create(checksum=checksum, size=len(data), data=data)
+
+        with self.assertRaisesMessage(MaxLengthExceeded, "MAX_MANIFEST_SIZE: 52428800"):
+            process_artifact_bundle(checksum, [checksum], [self.project.id])
+
+        with bugsink_override_settings(MAX_FILE_SIZE=1024 * 1024):
+            with self.assertRaisesMessage(MaxLengthExceeded, "MAX_FILE_SIZE: 1048576"):
+                process_artifact_bundle(checksum, [checksum], [self.project.id])
+
+        with bugsink_override_settings(MAX_FILE_SIZE=50 * 1024 * 1024):
+            with self.assertRaisesMessage(MaxLengthExceeded, "MAX_FILE_SIZE: 52428800"):
+                process_artifact_bundle(checksum, [checksum], [self.project.id])
 
     def test_artifact_bundle_rejects_extracted_file_larger_than_max_file_size(self):
         bundle = BytesIO()
@@ -459,13 +530,22 @@ class FilesTests(TransactionTestCase):
                     )
                     self.assertEqual(200, response.status_code)
 
-                    with self.assertRaises(MaxLengthExceeded):
-                        self.client.post(
-                            "/api/0/organizations/anyorg/artifactbundle/assemble/",
-                            json.dumps({"checksum": checksum, "chunks": [checksum], "projects": [self.project.slug]}),
-                            content_type="application/json",
-                            headers=self.token_headers,
-                        )
+                    response = self.client.post(
+                        "/api/0/organizations/anyorg/artifactbundle/assemble/",
+                        json.dumps({"checksum": checksum, "chunks": [checksum], "projects": [self.project.slug]}),
+                        content_type="application/json",
+                        headers=self.token_headers,
+                    )
+                    self.assertEqual(200, response.status_code)
+
+                    response = self.client.post(
+                        "/api/0/organizations/anyorg/artifactbundle/assemble/",
+                        json.dumps({"checksum": checksum, "chunks": [checksum], "projects": [self.project.slug]}),
+                        content_type="application/json",
+                        headers=self.token_headers,
+                    )
+                    self.assertEqual("error", response.json()["state"])
+                    self.assertIn("MAX_FILE_SIZE", response.json()["detail"])
 
     def test_artifact_bundle_assemble_does_not_use_checksum_as_temp_filename(self):
         data = b"hello world"
@@ -705,13 +785,13 @@ class FilesTests(TransactionTestCase):
         self.assertEqual(scoped_metadata, result[scoped_debug_id])
         self.assertEqual(legacy_metadata, result[legacy_debug_id])
 
-    @patch("files.views.extract_dif_metadata")
-    def test_difs_assemble_stores_project_scoped_metadata(self, mock_extract_dif_metadata):
+    @patch("files.tasks.extract_dif_kind")
+    def test_difs_assemble_stores_project_scoped_metadata(self, mock_extract_dif_kind):
         debug_id = uuid4()
         data = b"debug"
         checksum = sha1(data, usedforsecurity=False).hexdigest()
         Chunk.objects.create(checksum=checksum, size=len(data), data=data)
-        mock_extract_dif_metadata.return_value = {"kind": "dbg"}
+        mock_extract_dif_kind.return_value = "dbg"
 
         with bugsink_override_settings(FEATURE_MINIDUMPS=True):
             response = self.client.post(
@@ -732,37 +812,67 @@ class FilesTests(TransactionTestCase):
         self.assertEqual(self.project, metadata.project)
         self.assertEqual("debug-file", metadata.file.filename)
 
+    def test_difs_assemble_source_bundle(self):
+        debug_id = uuid4()
+        bundle = BytesIO()
+        bundle.write(b"SYSB\x02\x00\x00\x00")
+        with ZipFile(bundle, "w", compression=ZIP_DEFLATED) as zf:
+            zf.writestr("manifest.json", json.dumps({
+                "debug_id": str(debug_id),
+                "files": {"files/src/main.c": {"type": "source", "path": "/src/main.c"}},
+            }))
+            zf.writestr("files/src/main.c", b"int main(void) { return 0; }\n")
+
+        data = bundle.getvalue()
+        checksum = sha1(data, usedforsecurity=False).hexdigest()
+        Chunk.objects.create(checksum=checksum, size=len(data), data=data)
+
+        with bugsink_override_settings(FEATURE_MINIDUMPS=True):
+            response = self.client.post(
+                f"/api/0/projects/anyorg/{self.project.slug}/files/difs/assemble/",
+                json.dumps({
+                    checksum: {"chunks": [checksum], "debug_id": str(debug_id), "name": "example.src.zip"},
+                }),
+                content_type="application/json",
+                headers=self.token_headers,
+            )
+
+        self.assertEqual(200, response.status_code)
+        metadata = FileMetadata.objects.get(debug_id=debug_id, file_type="src")
+        self.assertEqual(self.project, metadata.project)
+        self.assertEqual(data, metadata.file.get_raw_data())
+
     @patch("files.minidump.extract_source_context")
-    @patch("files.minidump.symbolic.debuginfo.Archive.from_bytes")
-    @patch("files.minidump.symbolic.debuginfo.id_from_breakpad")
+    @patch("files.minidump.symalot.lookup_addresses")
+    @patch("files.minidump.symalot.normalize_debug_id")
     def test_minidump_symbolication_uses_project_scoped_debug_files(
         self,
-        mock_id_from_breakpad,
-        mock_archive_from_bytes,
+        mock_normalize_debug_id,
+        mock_lookup_addresses,
         mock_extract_source_context,
     ):
         debug_id = uuid4()
         other_project = Project.objects.create(name="other")
         dbg_file = File.objects.create(checksum="d" * 40, filename="debug-file", size=0, data=b"debug")
-        src_file = File.objects.create(checksum="e" * 40, filename="source-bundle", size=0, data=b"source")
+        bundle = BytesIO()
+        with ZipFile(bundle, "w") as zf:
+            zf.writestr("other.c", "source")
+        src_file = File.objects.create(checksum="e" * 40, filename="source-bundle", size=0, data=bundle.getvalue())
 
         FileMetadata.objects.create(project=other_project, debug_id=debug_id, file_type="dbg", file=dbg_file)
         FileMetadata.objects.create(project=other_project, debug_id=debug_id, file_type="src", file=src_file)
 
         line_info = SimpleNamespace(function_name="otherFunction", filename="other.c", line=7)
-        symcache = SimpleNamespace(lookup=lambda rel: [line_info])
-        debug_object = SimpleNamespace(make_symcache=lambda: symcache)
-        archive = SimpleNamespace(iter_objects=lambda: [debug_object])
-        mock_id_from_breakpad.return_value = str(debug_id)
-        mock_archive_from_bytes.return_value = archive
+        mock_normalize_debug_id.return_value = str(debug_id)
+        mock_lookup_addresses.return_value = [[line_info]]
         mock_extract_source_context.return_value = (["pre"], "context", ["post"])
 
         module = SimpleNamespace(addr=1000, size=100, debug_id="breakpad-debug-id")
         frame = SimpleNamespace(instruction=1010)
-        thread = SimpleNamespace(thread_id=1, frames=lambda: [frame])
+        thread = SimpleNamespace(thread_id=1, frames=[frame])
         process_state = SimpleNamespace(
-            modules=lambda: [module],
-            threads=lambda: [thread],
+            modules=[module],
+            threads=[thread],
             requesting_thread=0,
         )
 
@@ -775,13 +885,13 @@ class FilesTests(TransactionTestCase):
         self.assertEqual("context", rendered_frame["context_line"])
 
         # Negative case: the same debug ID does not resolve across project boundaries.
-        mock_archive_from_bytes.reset_mock()
+        mock_lookup_addresses.reset_mock()
         mock_extract_source_context.reset_mock()
 
         threads = event_threads_for_process_state(process_state, self.project)
         rendered_frame = threads[0]["stacktrace"]["frames"][0]
         self.assertEqual({"instruction_addr": "0x3f2"}, rendered_frame)
-        mock_archive_from_bytes.assert_not_called()
+        mock_lookup_addresses.assert_not_called()
         mock_extract_source_context.assert_not_called()
 
     @tag("samples")
@@ -928,6 +1038,115 @@ class FilesTests(TransactionTestCase):
         self.assertEqual(
             200, response.status_code, "Error in %s: %s" % (
                 filename, response.content if response.status_code != 302 else response.url))
+
+
+class ChunkStorageTests(TransactionTestCase):
+    def setUp(self):
+        super().setUp()
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.chunk_path = Path(self.tempdir.name, "chunks")
+        self.chunk_path.mkdir()
+        storages = get_test_object_storages(self.chunk_path, True, object_kind="chunk")
+        storages.update(get_test_object_storages(Path(self.tempdir.name, "files"), True))
+        self.storage_override = override_object_storages(storages)
+        self.storage_override.__enter__()
+
+    def tearDown(self):
+        self.storage_override.__exit__(None, None, None)
+        self.tempdir.cleanup()
+        super().tearDown()
+
+    def test_chunk_upload_to_object_storage(self):
+        token = AuthToken.objects.create(debug_files_upload=True)
+        for field in ("file", "file_gzip"):
+            with self.subTest(field=field):
+                data = field.encode() + b" chunk contents"
+                checksum = sha1(data, usedforsecurity=False).hexdigest()
+                for _ in range(2):
+                    upload = BytesIO(gzip.compress(data) if field == "file_gzip" else data)
+                    upload.name = checksum
+                    response = self.client.post(
+                        "/api/0/organizations/anyorg/chunk-upload/",
+                        data={field: upload},
+                        headers={"Authorization": f"Bearer {token.token}"},
+                    )
+                    self.assertEqual(200, response.status_code)
+
+                chunk = Chunk.objects.get(checksum=checksum)
+                self.assertEqual("local", chunk.storage_backend)
+                self.assertEqual(b"", chunk.data)
+                self.assertEqual(len(data), chunk.size)
+                self.assertEqual(data, chunk.get_raw_data())
+                self.assertEqual(data, (self.chunk_path / checksum).read_bytes())
+
+    def test_assemble_file_from_db_and_object_storage_chunks(self):
+        old_data, new_data = b"old chunk", b"new chunk"
+        old_checksum = sha1(old_data, usedforsecurity=False).hexdigest()
+        new_checksum = sha1(new_data, usedforsecurity=False).hexdigest()
+        Chunk.objects.create(checksum=old_checksum, size=len(old_data), data=old_data)
+        data = new_data + old_data + new_data
+        checksum = sha1(data, usedforsecurity=False).hexdigest()
+
+        create_chunk(new_checksum, new_data)
+        file, created = assemble_file(
+            checksum, [new_checksum, old_checksum, new_checksum], filename="mixed.txt")
+
+        self.assertTrue(created)
+        self.assertEqual("local", file.storage_backend)
+        self.assertEqual(data, file.get_raw_data())
+        self.assertEqual(2, Chunk.objects.count())
+
+    def test_create_chunk_does_not_rewrite_existing_db_chunk(self):
+        data = b"existing"
+        checksum = sha1(data, usedforsecurity=False).hexdigest()
+        existing = Chunk.objects.create(checksum=checksum, size=len(data), data=data)
+
+        chunk, created = create_chunk(checksum, data)
+
+        self.assertFalse(created)
+        self.assertEqual(existing.id, chunk.id)
+        self.assertIsNone(chunk.storage_backend)
+        self.assertEqual(data, chunk.get_raw_data())
+        self.assertEqual([], list(self.chunk_path.iterdir()))
+
+    def test_failed_chunk_storage_write_rolls_back_chunk(self):
+        with patch("files.tasks.write_to_storage", side_effect=OSError("write failed")):
+            with self.assertRaisesMessage(OSError, "write failed"):
+                create_chunk("a" * 40, b"chunk")
+
+        self.assertFalse(Chunk.objects.exists())
+
+    def test_external_chunk_cleanup_expires_old_chunks_and_keeps_recent_chunks(self):
+        old, _ = create_chunk("a" * 40, b"old")
+        recent, _ = create_chunk("b" * 40, b"recent")
+        Chunk.objects.filter(id=old.id).update(created_at=timezone.now() - timedelta(days=2))
+
+        vacuum_files_sync()
+
+        self.assertFalse(Chunk.objects.filter(id=old.id).exists())
+        self.assertFalse((self.chunk_path / old.checksum).exists())
+        self.assertEqual(b"recent", recent.get_raw_data())
+
+    def test_external_chunk_instance_cleanup_waits_for_commit(self):
+        chunk, _ = create_chunk("a" * 40, b"chunk")
+        path = self.chunk_path / chunk.checksum
+
+        with immediate_atomic():
+            chunk.delete()
+            self.assertTrue(path.exists())
+
+        self.assertFalse(path.exists())
+
+    def test_external_chunk_queryset_cleanup_is_not_run_on_rollback(self):
+        chunk, _ = create_chunk("a" * 40, b"chunk")
+
+        with self.assertRaisesMessage(ValueError, "rollback"):
+            with immediate_atomic():
+                Chunk.objects.filter(id=chunk.id).delete()
+                raise ValueError("rollback")
+
+        self.assertTrue(Chunk.objects.filter(id=chunk.id).exists())
+        self.assertEqual(b"chunk", chunk.get_raw_data())
 
 
 class EnterContextMixin:

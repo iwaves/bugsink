@@ -5,7 +5,7 @@ from django.test import TestCase as DjangoTestCase
 from bugsink.test_utils import TransactionTestCase25251 as TransactionTestCase
 from compat.timestamp import format_timestamp
 from events.factories import create_event_data
-from ingest.views import BaseIngestAPIView
+from ingest.tasks import digest_event
 from issues.grouping_mechanisms import BUGSINK_GROUPING_V3, BUGSINK_GROUPING_V4
 from issues.models import Grouping, Issue
 from issues.utils import get_key_with_mechanism_for_data
@@ -117,7 +117,7 @@ class GroupingV4IngestTestCase(TransactionTestCase):
         for order_id in ["0a1b2c", "9f8e7d", "5c6d7e"]:
             message = f'Could not acquire lock for resource "iwvs_finalize_order_{order_id}"'
             event_data = {**create_event_data(), **exception_event_data(("ApiLockException", message, [frame()]))}
-            BaseIngestAPIView().digest_event(
+            digest_event(
                 event_metadata={
                     "event_id": event_data["event_id"],
                     "project_id": project.id,
