@@ -1,0 +1,68 @@
+{
+  "planPath": "docs/superpowers/plans/2026-11-04-mcp-server.md",
+  "tasks": [
+    {
+      "id": 1,
+      "subject": "Task 1: REST API prerequisites (authorship, limit, in_app_only)",
+      "status": "completed",
+      "description": "**Goal:** Comments and triage actions made with a user-bound token record that user; list endpoints accept ?limit=; the stacktrace endpoint accepts ?in_app_only=true.\n\n**Files:**\n- Modify: issues/serializers.py, issues/api_views.py, bugsink/api_pagination.py, events/api_views.py\n- Test: issues/test_api.py, events/test_api.py\n\n**Acceptance Criteria:**\n- [ ] Comment via user-bound token returns \"user\": <id>; service token null\n- [ ] Resolve via user-bound token records TurningPoint.user\n- [ ] ?limit=1 returns one result with non-null next\n- [ ] ?in_app_only=true passes in_app_only=True to render_stacktrace_md\n\n**Verify:** python manage.py test issues.test_api events.test_api -v2 -> OK\n\n**Steps:** see plan Task 1 (tests first, then implementation, then commit).\n\n```json:metadata\n{\"files\": [\"issues/serializers.py\", \"issues/api_views.py\", \"bugsink/api_pagination.py\", \"events/api_views.py\", \"issues/test_api.py\", \"events/test_api.py\"], \"verifyCommand\": \"python manage.py test issues.test_api events.test_api -v2\", \"acceptanceCriteria\": [\"comment records user of user-bound token\", \"resolve records user of user-bound token\", \"limit param works\", \"in_app_only param works\"]}\n```"
+    },
+    {
+      "id": 2,
+      "subject": "Task 2: App skeleton, models and OAuth helpers",
+      "status": "completed",
+      "blockedBy": [1],
+      "description": "**Goal:** mcpserver app with OAuthAuthorizationCode, OAuthGrant, migration, and unit-tested helpers (PKCE, loopback redirects, signed client_id).\n\n**Files:**\n- Create: mcpserver/__init__.py, apps.py, models.py, oauth.py, migrations/\n- Modify: bugsink/settings/default.py (BUGSINK_APPS)\n- Test: mcpserver/test_oauth.py\n\n**Acceptance Criteria:**\n- [ ] RFC 7636 vector accepted, wrong verifier rejected\n- [ ] Loopback allowed, non-loopback rejected, port ignored, path compared\n- [ ] Signed client_id round-trips; tampered -> None\n- [ ] makemigrations --check clean\n\n**Verify:** python manage.py test mcpserver.test_oauth -v2 -> OK\n\n**Steps:** see plan Task 2.\n\n```json:metadata\n{\"files\": [\"mcpserver/apps.py\", \"mcpserver/models.py\", \"mcpserver/oauth.py\", \"mcpserver/test_oauth.py\", \"bugsink/settings/default.py\"], \"verifyCommand\": \"python manage.py test mcpserver.test_oauth -v2\", \"acceptanceCriteria\": [\"PKCE check\", \"redirect validation\", \"signed client_id\", \"migration clean\"]}\n```"
+    },
+    {
+      "id": 3,
+      "subject": "Task 3: Discovery and client registration endpoints",
+      "status": "completed",
+      "blockedBy": [2],
+      "description": "**Goal:** Anonymous, CSRF-free discovery (RFC 9728, RFC 8414) and DCR (RFC 7591) for loopback clients.\n\n**Files:**\n- Create: mcpserver/oauth_views.py, mcpserver/urls.py\n- Modify: bugsink/urls.py\n- Test: mcpserver/test_oauth_views.py\n\n**Acceptance Criteria:**\n- [ ] Both protected-resource metadata URLs return resource BASE_URL/mcp\n- [ ] AS metadata has token endpoint and S256\n- [ ] Register returns 201 with valid client_id under enforced CSRF\n- [ ] Non-loopback -> 400 invalid_redirect_uri; non-JSON -> 400 invalid_client_metadata\n\n**Verify:** python manage.py test mcpserver.test_oauth_views -v2 -> OK\n\n**Steps:** see plan Task 3.\n\n```json:metadata\n{\"files\": [\"mcpserver/oauth_views.py\", \"mcpserver/urls.py\", \"bugsink/urls.py\", \"mcpserver/test_oauth_views.py\"], \"verifyCommand\": \"python manage.py test mcpserver.test_oauth_views -v2\", \"acceptanceCriteria\": [\"discovery\", \"registration\", \"rejections\"]}\n```"
+    },
+    {
+      "id": 4,
+      "subject": "Task 4: Consent form and authorize endpoint",
+      "status": "completed",
+      "blockedBy": [3],
+      "description": "**Goal:** Logged-in consent page with capability choice; redirect back with single-use code or access_denied.\n\n**Files:**\n- Create: mcpserver/forms.py, templates/mcpserver/consent.html, templates/mcpserver/oauth_error.html\n- Modify: mcpserver/oauth_views.py, mcpserver/urls.py\n- Test: mcpserver/test_authorize.py\n\n**Acceptance Criteria:**\n- [ ] Anonymous -> login redirect with next\n- [ ] Consent defaults: read+comment checked, triage/teams unchecked\n- [ ] Unregistered redirect -> 400 page, no Location\n- [ ] Missing challenge -> error=invalid_request with state\n- [ ] Allow -> code with exact redirect_uri and sorted capabilities; Deny -> access_denied\n- [ ] Project binding with defaults validates\n\n**Verify:** python manage.py test mcpserver.test_authorize -v2 -> OK\n\n**Steps:** see plan Task 4.\n\n```json:metadata\n{\"files\": [\"mcpserver/forms.py\", \"mcpserver/oauth_views.py\", \"mcpserver/templates/mcpserver/consent.html\", \"mcpserver/templates/mcpserver/oauth_error.html\", \"mcpserver/test_authorize.py\"], \"verifyCommand\": \"python manage.py test mcpserver.test_authorize -v2\", \"acceptanceCriteria\": [\"login redirect\", \"consent defaults\", \"no open redirect\", \"code creation\", \"deny\"]}\n```"
+    },
+    {
+      "id": 5,
+      "subject": "Task 5: Token endpoint (code exchange, refresh rotation, replay window)",
+      "status": "completed",
+      "blockedBy": [4],
+      "description": "**Goal:** /oauth/token issues 1h user-bound AuthTokens plus rotating refresh tokens with a 60s replay window, inside immediate_atomic, with cleanup.\n\n**Files:**\n- Modify: mcpserver/oauth_views.py, mcpserver/urls.py\n- Test: mcpserver/test_token.py\n\n**Acceptance Criteria:**\n- [ ] Exchange -> Bearer, expires_in 3600, no-store, user-bound token with code's capabilities\n- [ ] Reused code / wrong verifier -> invalid_grant; tampered client_id -> 401 invalid_client\n- [ ] Refresh rotates in place (one AuthToken, old access token gone)\n- [ ] Replay within 60s returns same tokens; after -> invalid_grant\n- [ ] Inactive user -> invalid_grant and token deleted\n- [ ] Expired grant cleaned up; unknown grant_type -> unsupported_grant_type\n\n**Verify:** python manage.py test mcpserver.test_token -v2 -> OK\n\n**Steps:** see plan Task 5.\n\n```json:metadata\n{\"files\": [\"mcpserver/oauth_views.py\", \"mcpserver/urls.py\", \"mcpserver/test_token.py\"], \"verifyCommand\": \"python manage.py test mcpserver.test_token -v2\", \"acceptanceCriteria\": [\"exchange\", \"single-use code\", \"rotation\", \"replay window\", \"inactive user\", \"cleanup\"]}\n```"
+    },
+    {
+      "id": 6,
+      "subject": "Task 6: Connected agents page and token-list integration",
+      "status": "completed",
+      "blockedBy": [5],
+      "description": "**Goal:** /oauth/connections/ lists and disconnects own grants with setup instructions; token list hides OAuth tokens and links there.\n\n**Files:**\n- Create: mcpserver/templates/mcpserver/connections.html\n- Modify: mcpserver/oauth_views.py, mcpserver/urls.py, bsmain/views.py, bsmain/templates/bsmain/auth_token_list.html\n- Test: mcpserver/test_connections.py\n\n**Acceptance Criteria:**\n- [ ] Own grants listed, others not; claude mcp add snippet with BASE_URL/mcp shown\n- [ ] Disconnect deletes grant and token; other user's grant -> 404\n- [ ] Token list hides OAuth token and links to /oauth/connections/\n\n**Verify:** python manage.py test mcpserver.test_connections bsmain -v2 -> OK\n\n**Steps:** see plan Task 6 (Step 0: npm view mcp-remote version to pin).\n\n```json:metadata\n{\"files\": [\"mcpserver/oauth_views.py\", \"mcpserver/templates/mcpserver/connections.html\", \"bsmain/views.py\", \"bsmain/templates/bsmain/auth_token_list.html\", \"mcpserver/test_connections.py\"], \"verifyCommand\": \"python manage.py test mcpserver.test_connections bsmain -v2\", \"acceptanceCriteria\": [\"listing\", \"disconnect\", \"token list filter and link\"]}\n```"
+    },
+    {
+      "id": 7,
+      "subject": "Task 7: Tool table and in-process dispatch",
+      "status": "completed",
+      "blockedBy": [1, 2],
+      "description": "**Goal:** mcpserver/tools.py with 16 tools, capability filtering, argument validation, and dispatch to DRF views with the caller's token.\n\n**Files:**\n- Create: mcpserver/tools.py\n- Test: mcpserver/test_tools.py\n\n**Acceptance Criteria:**\n- [ ] Each tool's capabilities include its view's token_guard capability\n- [ ] tools_for filters by capability; annotations correct\n- [ ] get_issue works for member; foreign project -> isError, 'HTTP 403'\n- [ ] Unknown tool/missing/unknown arg/bad enum -> InvalidParams\n- [ ] get_event drops stacktrace_md; create_project returns dsn; >60k text truncated\n\n**Verify:** python manage.py test mcpserver.test_tools -v2 -> OK\n\n**Steps:** see plan Task 7.\n\n```json:metadata\n{\"files\": [\"mcpserver/tools.py\", \"mcpserver/test_tools.py\"], \"verifyCommand\": \"python manage.py test mcpserver.test_tools -v2\", \"acceptanceCriteria\": [\"guard consistency\", \"filtering\", \"dispatch\", \"errors\", \"post-processing\"]}\n```"
+    },
+    {
+      "id": 8,
+      "subject": "Task 8: /mcp JSON-RPC endpoint",
+      "status": "completed",
+      "blockedBy": [7],
+      "description": "**Goal:** Stateless MCP Streamable HTTP at /mcp and /mcp/ with 401+WWW-Authenticate, user-bound only, Origin check, initialize/ping/tools/list/tools/call.\n\n**Files:**\n- Create: mcpserver/mcp_views.py\n- Modify: mcpserver/urls.py\n- Test: mcpserver/test_mcp.py\n\n**Acceptance Criteria:**\n- [ ] No token -> 401 with resource_metadata pointer on both routes\n- [ ] Service token 403; foreign Origin 403; GET 405\n- [ ] -32700/-32600/-32601/-32602 and 202 for notifications\n- [ ] initialize version negotiation and instructions\n- [ ] tools/list filtered; tools/call works\n\n**Verify:** python manage.py test mcpserver.test_mcp -v2 -> OK\n\n**Steps:** see plan Task 8.\n\n```json:metadata\n{\"files\": [\"mcpserver/mcp_views.py\", \"mcpserver/urls.py\", \"mcpserver/test_mcp.py\"], \"verifyCommand\": \"python manage.py test mcpserver.test_mcp -v2\", \"acceptanceCriteria\": [\"auth\", \"protocol errors\", \"initialize\", \"tools\"]}\n```"
+    },
+    {
+      "id": 9,
+      "subject": "Task 9: End-to-end flow test, full suite, manual check with Claude Code",
+      "status": "completed",
+      "blockedBy": [6, 8],
+      "description": "**Goal:** One integration test over the real OAuth + MCP flow; full suite, ruff and migrations clean; manual check with Claude Code and mcp-remote.\n\n**Files:**\n- Create: mcpserver/tests.py\n\n**Acceptance Criteria:**\n- [ ] Integration test passes (register -> consent -> token -> tools -> comment authored by user -> refresh -> disconnect -> 401)\n- [ ] python manage.py test OK; ruff check . clean; makemigrations --check clean\n- [ ] Manual: Claude Code connects via OAuth, list_issues returns data; /mcp/ variant and mcp-remote fallback port work\n\n**Verify:** python manage.py test mcpserver -v2 && ruff check . -> OK\n\n**Steps:** see plan Task 9.\n\n```json:metadata\n{\"files\": [\"mcpserver/tests.py\"], \"verifyCommand\": \"python manage.py test mcpserver -v2 && ruff check .\", \"acceptanceCriteria\": [\"integration test\", \"full suite and ruff\", \"manual Claude Code check\"]}\n```"
+    }
+  ],
+  "lastUpdated": "2026-11-04T12:30:00Z"
+}
