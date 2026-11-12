@@ -7,18 +7,25 @@ from unittest.mock import Mock, patch
 from urllib.parse import urlencode
 from uuid import uuid4
 
+import requests
+from django.contrib.auth import get_user_model
 from django.test import Client, TestCase as DjangoTestCase
+from django.urls import reverse
 from django.utils import timezone
+from rest_framework.test import APIClient
 
+from bsmain.models import AuthToken
 from bugsink.app_settings import DEFAULTS, get_settings, override_settings as override_bugsink_settings
+from bugsink.test_utils import TransactionTestCase25251 as TransactionTestCase
 from events.factories import create_event
 from issues.factories import get_or_create_issue
-from issues.models import TurningPoint, TurningPointKind
-from projects.models import Project
+from issues.models import IssueStateManager, TurningPoint, TurningPointKind, apply_issue_action
+from projects.models import Project, ProjectMembership
 
-from .models import MessagingServiceConfig
+from .models import MessagingServiceConfig, SlackMessage
 from .service_backends.slack import SLACK_GREEN, SLACK_RED, build_alert_message, slack_backend_send_alert
-from .service_backends.slack_app import SlackAppConfigForm, slack_app_respond, verify_slack_signature
+from .service_backends.slack_app import (
+    SlackAppConfigForm, build_state_message, slack_app_respond, verify_slack_signature)
 
 
 class TestSettings(DjangoTestCase):
@@ -34,6 +41,14 @@ class TestSettings(DjangoTestCase):
 
 def section_texts(message):
     return [b["text"]["text"] for b in message["attachments"][0]["blocks"] if b["type"] == "section"]
+
+
+def headline(message):
+    return section_texts(message)[0].split("\n")[0]
+
+
+def has_buttons(message):
+    return message["attachments"][0]["blocks"][-1]["type"] == "actions"
 
 
 class TestBuildAlertMessage(DjangoTestCase):
@@ -114,9 +129,11 @@ class TestWebhookBackendUsesBuilder(DjangoTestCase):
 
         data = json.loads(mock_post.call_args.kwargs["data"])
         self.assertIn("Event in production from CAT Backend", data["text"])
+        self.assertFalse(issue.slack_messages.exists())  # webhooks give no handle to update the message with
 
 
 TOKEN = "xoxb-test"  # nosec B105
+POSTED = {"ok": True, "channel": "C0123", "ts": "1762934400.000100"}  # Slack answers with the channel's ID
 
 
 class TestSlackAppConfigForm(DjangoTestCase):
@@ -146,7 +163,7 @@ class TestSlackAppSending(DjangoTestCase):
 
     @patch("alerts.service_backends.slack_app.requests.post")
     def test_alert_is_posted_to_channel_with_bot_token(self, mock_post):
-        mock_post.return_value = Mock(json=lambda: {"ok": True})
+        mock_post.return_value = Mock(json=lambda: POSTED)
         self.config.last_failure_timestamp = timezone.now()
         self.config.save()
 
@@ -160,6 +177,9 @@ class TestSlackAppSending(DjangoTestCase):
         self.assertEqual(kwargs["json"]["attachments"][0]["blocks"][-1]["type"], "actions")
         self.config.refresh_from_db()
         self.assertIsNone(self.config.last_failure_timestamp)
+        message = SlackMessage.objects.get()
+        self.assertEqual((message.issue, message.service_config), (self.issue, self.config))
+        self.assertEqual((message.channel, message.ts), ("C0123", "1762934400.000100"))
 
     @patch("alerts.service_backends.slack_app.requests.post")
     def test_slack_error_is_stored_as_failure(self, mock_post):
@@ -171,6 +191,7 @@ class TestSlackAppSending(DjangoTestCase):
         self.config.refresh_from_db()
         self.assertEqual(self.config.last_failure_error_type, "SlackAPIError")
         self.assertEqual(self.config.last_failure_error_message, "channel_not_found")
+        self.assertFalse(SlackMessage.objects.exists())
 
     @patch("alerts.service_backends.slack_app.requests.post")
     def test_test_message_is_posted_to_channel(self, mock_post):
@@ -190,6 +211,21 @@ def sign(body, secret=SECRET, timestamp=None):
     timestamp = str(int(time.time())) if timestamp is None else str(timestamp)
     digest = hmac.new(secret.encode(), f"v0:{timestamp}:".encode() + body, hashlib.sha256).hexdigest()
     return timestamp, "v0=" + digest
+
+
+def post_click(action_id, issue_id, secret=SECRET, payload_type="block_actions"):
+    payload = {
+        "type": payload_type,
+        "response_url": "https://hooks.slack.com/actions/T1/2/3",
+        "actions": [{"action_id": action_id, "value": str(issue_id)}],
+    }
+    body = urlencode({"payload": json.dumps(payload)}).encode()
+    timestamp, signature = sign(body, secret=secret)
+
+    with override_bugsink_settings(SLACK_SIGNING_SECRET=SECRET):
+        return Client(enforce_csrf_checks=True).post(
+            "/alerts/slack/interactivity/", body, content_type="application/x-www-form-urlencoded",
+            HTTP_X_SLACK_REQUEST_TIMESTAMP=timestamp, HTTP_X_SLACK_SIGNATURE=signature)
 
 
 class TestVerifySlackSignature(DjangoTestCase):
@@ -239,23 +275,13 @@ class TestSlackInteractivity(DjangoTestCase):
         self.issue, _ = get_or_create_issue(project=self.project)
 
     def click(self, action_id, secret=SECRET, issue_id=None, payload_type="block_actions"):
-        payload = {
-            "type": payload_type,
-            "response_url": "https://hooks.slack.com/actions/T1/2/3",
-            "actions": [{"action_id": action_id, "value": str(issue_id or self.issue.id)}],
-        }
-        body = urlencode({"payload": json.dumps(payload)}).encode()
-        timestamp, signature = sign(body, secret=secret)
-
-        with override_bugsink_settings(SLACK_SIGNING_SECRET=SECRET), patch("alerts.views.slack_app_respond") as respond:
-            response = Client(enforce_csrf_checks=True).post(
-                self.url, body, content_type="application/x-www-form-urlencoded",
-                HTTP_X_SLACK_REQUEST_TIMESTAMP=timestamp, HTTP_X_SLACK_SIGNATURE=signature)
+        with patch("alerts.views.slack_app_respond") as respond:
+            response = post_click(action_id, issue_id or self.issue.id, secret, payload_type)
         return response, respond
 
     @patch("alerts.service_backends.slack_app.requests.post")
     def test_every_button_of_a_sent_alert_is_handled(self, mock_post):
-        mock_post.return_value = Mock(json=lambda: {"ok": True})
+        mock_post.return_value = Mock(json=lambda: POSTED)
 
         for index, state in enumerate(["is_resolved", "is_muted", "is_muted"]):
             project = Project.objects.create(name=f"Project {index}")
@@ -282,9 +308,9 @@ class TestSlackInteractivity(DjangoTestCase):
         response_url, body = respond.delay.call_args.args
         self.assertEqual(response_url, "https://hooks.slack.com/actions/T1/2/3")
         self.assertTrue(body["replace_original"])
-        self.assertIn("*Marked as fixed*", section_texts(body)[0])
+        self.assertEqual(headline(body), "*Resolved*")
         self.assertEqual(body["attachments"][0]["color"], SLACK_GREEN)
-        self.assertNotIn("actions", [b["type"] for b in body["attachments"][0]["blocks"]])
+        self.assertFalse(has_buttons(body))
 
     def test_snooze_mutes_for_an_hour(self):
         self.click("snooze")
@@ -377,3 +403,156 @@ class TestSlackAppRespond(DjangoTestCase):
             slack_app_respond("https://evil.example.com/x", {"text": "x"})
 
         mock_post.assert_not_called()
+
+
+class TestBuildStateMessage(DjangoTestCase):
+
+    def setUp(self):
+        self.alice = get_user_model().objects.create_user(username="alice", first_name="Alice", last_name="Smith")
+
+    def message_after(self, *actions, user=None):
+        issue, _ = get_or_create_issue()
+        for action in actions:
+            apply_issue_action(IssueStateManager, issue, action, user)
+        return build_state_message(issue)
+
+    def test_resolved_or_muted_shows_the_state_without_buttons(self):
+        for action, expected in [
+            ("resolve", "*Resolved*"),
+            ("resolved_next", "*Resolved in next release*"),
+            ("resolved_release:1.2.3", "*Resolved in 1.2.3*"),
+            ("mute", "*Muted*"),
+            ("mute_until:hour,3,5", "*Muted until 5 events per 3 hours*"),
+        ]:
+            with self.subTest(action):
+                message = self.message_after(action)
+
+                self.assertEqual(headline(message), expected)
+                self.assertEqual(message["attachments"][0]["color"], SLACK_GREEN)
+                self.assertFalse(has_buttons(message))
+
+    def test_mute_deadline_is_in_local_time(self):
+        self.assertRegex(headline(self.message_after("mute_for:day,1,")), r"^\*Muted until \d+ \w{3} \d+:\d\d CES?T\*$")
+
+    def test_names_who_changed_the_state(self):
+        self.assertEqual(headline(self.message_after("resolve", user=self.alice)), "*Resolved by Alice Smith*")
+
+    def test_reopened_or_unmuted_gets_its_buttons_back(self):
+        for actions, expected in [
+            (["resolve", "reopen"], "*Reopened by Alice Smith*"),
+            (["mute", "unmute"], "*Unmuted by Alice Smith*"),
+        ]:
+            with self.subTest(actions):
+                message = self.message_after(*actions, user=self.alice)
+
+                self.assertEqual(headline(message), expected)
+                self.assertEqual(message["attachments"][0]["color"], SLACK_RED)
+                self.assertTrue(has_buttons(message))
+
+
+class TestSlackAppFollowsIssue(TransactionTestCase):
+    """An alert posted through slack_app follows its issue: state changes update it, comments go to its thread."""
+
+    def setUp(self):
+        super().setUp()
+        self.alice = get_user_model().objects.create_user(username="alice")
+        self.project = Project.objects.create(name="CAT Backend")
+        ProjectMembership.objects.create(project=self.project, user=self.alice, accepted=True)
+        self.issue, _ = get_or_create_issue(project=self.project)
+        self.config = MessagingServiceConfig.objects.create(
+            project=self.project, display_name="#errors", kind="slack_app", config=json.dumps({"channel": "#errors"}))
+
+        patcher = patch("alerts.service_backends.slack_app.requests.post", return_value=Mock(json=lambda: POSTED))
+        self.slack = patcher.start()
+        self.addCleanup(patcher.stop)
+        self.config.get_backend().send_alert(str(self.issue.id), "New issue", "a", "NEW")
+
+    def sent_to(self, url_prefix):
+        return [c.kwargs["json"] for c in self.slack.call_args_list if c.args[0].startswith(url_prefix)]
+
+    def updates(self):
+        return self.sent_to("https://slack.com/api/chat.update")
+
+    def thread_replies(self):
+        return [data for data in self.sent_to("https://slack.com/api/chat.postMessage") if "thread_ts" in data]
+
+    def token(self):
+        return AuthToken.objects.create(
+            is_user_bound=True, user=self.alice, issues_read=True, issues_triage=True, issues_comment=True).token
+
+    def call_mcp_tool(self, name, **arguments):
+        body = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": arguments}}
+        response = Client().post(
+            "/mcp", json.dumps(body), content_type="application/json", HTTP_AUTHORIZATION=f"Bearer {self.token()}")
+        self.assertFalse(response.json()["result"]["isError"])
+
+    def test_ui_resolve_and_reopen(self):
+        self.client.force_login(self.alice)
+
+        self.client.post(self.issue.get_absolute_url(), {"action": "resolve"})
+        self.client.post(self.issue.get_absolute_url(), {"action": "reopen"})
+
+        resolved, reopened = self.updates()
+        self.assertEqual((resolved["channel"], resolved["ts"]), ("C0123", "1762934400.000100"))
+        self.assertEqual(headline(resolved), "*Resolved by alice*")
+        self.assertFalse(has_buttons(resolved))
+        self.assertEqual(headline(reopened), "*Reopened by alice*")
+        self.assertTrue(has_buttons(reopened))
+
+    def test_ui_bulk_action(self):
+        self.client.force_login(self.alice)
+
+        self.client.post(f"/issues/{self.project.id}/", {"issue_ids[]": [str(self.issue.id)], "action": "mute"})
+
+        self.assertEqual([headline(update) for update in self.updates()], ["*Muted by alice*"])
+
+    def test_api(self):
+        client = APIClient()
+        client.credentials(HTTP_AUTHORIZATION=f"Bearer {self.token()}")
+
+        self.assertEqual(client.post(reverse("api:issue-mute", args=[self.issue.id])).status_code, 200)
+
+        self.assertEqual([headline(update) for update in self.updates()], ["*Muted by alice*"])
+
+    def test_mcp(self):
+        self.call_mcp_tool("resolve_issue", issue=str(self.issue.id))
+
+        self.assertEqual([headline(update) for update in self.updates()], ["*Resolved in next release by alice*"])
+
+    def test_slack_button_updates_and_replies_alike(self):
+        self.assertEqual(post_click("resolve", self.issue.id).status_code, 200)
+
+        [update] = self.updates()
+        [reply] = self.sent_to("https://hooks.slack.com/")
+        self.assertEqual(headline(update), "*Resolved*")
+        self.assertEqual(reply["attachments"], update["attachments"])
+
+    def test_slack_failure_leaves_the_state_change_alone(self):
+        self.slack.side_effect = requests.ConnectionError("Slack is down")
+        self.client.force_login(self.alice)
+
+        self.assertEqual(self.client.post(self.issue.get_absolute_url(), {"action": "resolve"}).status_code, 302)
+
+        self.issue.refresh_from_db()
+        self.assertTrue(self.issue.is_resolved)
+        self.config.refresh_from_db()
+        self.assertEqual(self.config.last_failure_error_type, "ConnectionError")
+
+    def test_ui_comment_goes_to_the_thread(self):
+        self.client.force_login(self.alice)
+
+        self.client.post(f"/issues/issue/{self.issue.id}/history/comment/", {"comment": "Looking into <it>"})
+
+        self.assertEqual(self.thread_replies(), [{
+            "channel": "C0123", "thread_ts": "1762934400.000100",
+            "text": "*alice* commented:\nLooking into &lt;it&gt;"}])
+
+    def test_mcp_comment_goes_to_the_thread_of_the_first_alert(self):
+        self.slack.return_value = Mock(json=lambda: {**POSTED, "ts": "1762938000.000200"})
+        self.config.get_backend().send_alert(str(self.issue.id), "Recurring issue", "a", "RECURRING")
+
+        self.call_mcp_tool("comment_issue", issue=str(self.issue.id), comment="Fixed in abc123")
+
+        [reply] = self.thread_replies()
+        self.assertEqual(reply["thread_ts"], "1762934400.000100")
+        self.assertEqual(reply["text"], "*alice* commented:\nFixed in abc123")

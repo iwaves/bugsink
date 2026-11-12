@@ -15,8 +15,7 @@ from issues.models import Issue, IssueStateManager, apply_issue_action, is_valid
 
 from .forms import AlertSettingsForm
 from .models import AlertSettings
-from .service_backends.slack import SLACK_GREEN, build_alert_message, latest_environment
-from .service_backends.slack_app import slack_app_respond, verify_slack_signature
+from .service_backends.slack_app import build_state_message, slack_app_respond, verify_slack_signature
 
 DEBUG_CONTEXTS = {
     "issue_alert": {
@@ -31,12 +30,8 @@ DEBUG_CONTEXTS = {
     },
 }
 
-# action_id -> (issue action, status shown on the message after the click)
-SLACK_ISSUE_ACTIONS = {
-    "resolve": ("resolve", "Marked as fixed"),
-    "snooze": ("mute_for:hour,1,", "Snoozed for 1 hour"),
-    "ignore": ("mute", "Ignored"),
-}
+# action_id -> issue action
+SLACK_ISSUE_ACTIONS = {"resolve": "resolve", "snooze": "mute_for:hour,1,", "ignore": "mute"}
 
 
 def debug_email(request, template_name):
@@ -62,7 +57,7 @@ def slack_interactivity(request):
     action = (payload.get("actions") or [{}])[0]
     if payload.get("type") != "block_actions" or action.get("action_id") not in SLACK_ISSUE_ACTIONS:
         return HttpResponseBadRequest()
-    issue_action, status = SLACK_ISSUE_ACTIONS[action["action_id"]]
+    issue_action = SLACK_ISSUE_ACTIONS[action["action_id"]]
 
     try:
         with immediate_atomic(only_if_needed=True):
@@ -75,8 +70,8 @@ def slack_interactivity(request):
         reply = _ephemeral("This issue no longer exists.")
     else:
         if is_valid:
-            reply = {"replace_original": True, **build_alert_message(
-                issue, latest_environment(issue), status, color=SLACK_GREEN)}
+            # apply_issue_action updates the messages whose ts we stored; this also covers older ones
+            reply = {"replace_original": True, **build_state_message(issue)}
         else:
             reply = _ephemeral("This issue has already been resolved or muted.")
 

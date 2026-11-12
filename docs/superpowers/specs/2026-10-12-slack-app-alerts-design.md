@@ -16,7 +16,9 @@
 * Per-project config of `slack_app`: `channel` only (`#name` or channel ID). A project can have several rows.
 * Slack users are not Bugsink users: any channel member can click. Actions are recorded with `user=None` (as the REST
   API does).
-* Out of scope: Slack OAuth install flow, mapping Slack to Bugsink users, updating messages on changes made elsewhere.
+* Out of scope: Slack OAuth install flow, mapping Slack to Bugsink users.
+* Posted messages follow the issue's state (resolved / muted / reopened / unmuted), wherever it is changed; see
+  "Following the issue's state" below. Only `slack_app` can do this: a webhook gives no handle to edit its message.
 
 ## Components
 
@@ -62,11 +64,33 @@ is escaped with `_escape` (only `&`, `<`, `>`, the characters Slack requires), n
    is a 400. Map `action_id` to `resolve` / `mute_for:hour,1,` / `mute`. Inside one transaction: load the issue, gate on
    `is_valid_issue_action`, then `apply_issue_action(IssueStateManager, issue, action, user=None)` and `issue.save()`.
 3. Return 200 immediately; then a snappea task POSTs to `response_url` (accepted only if it starts with
-   `https://hooks.slack.com/`) with `replace_original`: the same message rebuilt with `buttons=False`, a status as
-   `state_description` ("Marked as fixed" / "Snoozed for 1 hour" / "Ignored") and a green bar.
+   `https://hooks.slack.com/`) with `replace_original`: `build_state_message(issue)` (see below), i.e. the same text
+   that `chat.update` sends, so both agree. This also covers messages posted before their `ts` was stored.
 4. Action not valid for the issue's current state (e.g. mute on a resolved issue, resolve twice): ephemeral reply via
    `response_url` ("This issue has already been resolved or muted."), no state change. `IncongruentStateException` is
    not used. Unknown/deleted issue: ephemeral "This issue no longer exists.".
+
+### Following the issue's state (`chat.update`)
+* `alerts.SlackMessage` (issue, service_config, channel, ts): one row per posted alert (new, regression, recurring,
+  unmuted), written after a successful `chat.postMessage`. `channel` is the ID from Slack's answer: `chat.update`
+  does not take `#name`. Deleted with the issue (generic dependency deletion) and with its service config (CASCADE).
+* Hook: the end of `apply_issue_action` (issues/models.py), which UI (single and bulk), REST API, MCP (via the REST
+  API) and the Slack buttons all go through. It takes the issue ids before the action (a bulk qs may filter on the
+  state the action changes) and calls `delay_on_commit(slack_app_update_messages, ids)`; not for `delete`.
+* `slack_app_update_messages` (snappea, after commit): for each of the issue's messages, `chat.update` with
+  `build_state_message(issue)`. Failures are stored on the service config like send failures and never raised, so the
+  state change stands.
+* `build_state_message(issue)` renders the current state, "by {name}" from the latest resolve/mute/unmute/reopen
+  turning point when it has a user (Slack clicks and service tokens have none):
+  * green, no buttons: "Resolved", "Resolved in next release", "Resolved in {release}", "Muted", "Muted until
+    {j M G:i T}" (local time), "Muted until {n} events per {k} {period}s"
+  * red, with buttons: "Reopened" / "Unmuted"
+* Not hooked: state changes made by ingest (regression, volume- or time-based unmute). Those post a new alert anyway.
+* Comments: `add_comment(issue, user, comment)` (issues/models.py) creates the MANUAL_ANNOTATION turning point for the
+  UI and the REST API (and so MCP's `comment_issue`), and queues `slack_app_post_comment` after commit. That posts
+  "*{name}* commented:\n{comment}" (escaped) as a thread reply (`thread_ts`) under the first alert of each service
+  config, so all comments on an issue end up in one thread per channel. Edits and deletions of comments are not synced.
+* Slack scope: `chat:write` covers `chat.update` and thread replies; nothing to change on the Slack side.
 
 ## Testing
 
@@ -78,6 +102,9 @@ is escaped with `_escape` (only `&`, `<`, `>`, the characters Slack requires), n
   `value` from the posted payload, and POST a signed click built from them; each must return 200 and change the issue
   (resolved / muted / muted). Guards that the ids built in `slack.py` match the click endpoint's keys.
 * Existing Slack tests keep passing; webhook alert test asserts the new attachment shape.
+* State updates: `build_state_message` per state; one end-to-end test per source (UI single + bulk, REST API, MCP,
+  Slack button) asserting the `chat.update` call; a Slack failure leaves the state change in place. Comments via UI
+  and MCP land in the first alert's thread.
 
 ## Deployment
 

@@ -702,6 +702,8 @@ def make_issue_history(issue_or_qs, action, user):
 
 
 def apply_issue_action(manager, issue_or_qs, action, user):
+    # taken before the action, because the qs may filter on the state that the action changes
+    issue_ids = [issue_or_qs.id] if isinstance(issue_or_qs, Issue) else list(issue_or_qs.values_list("id", flat=True))
     make_issue_history(issue_or_qs, action, user)
 
     if action == "resolve":
@@ -734,6 +736,10 @@ def apply_issue_action(manager, issue_or_qs, action, user):
         manager.unmute(issue_or_qs)
     elif action == "delete":
         manager.delete(issue_or_qs)
+
+    if action != "delete":
+        from alerts.service_backends.slack_app import slack_app_update_messages  # avoid circular import
+        delay_on_commit(slack_app_update_messages, [str(issue_id) for issue_id in issue_ids])
 
 
 class TurningPointKind(models.IntegerChoices):
@@ -785,3 +791,13 @@ class TurningPoint(models.Model):
                 self._parsed_metadata["mute_for"]["unmute_after"] = \
                     parse_timestamp(self._parsed_metadata["mute_for"]["unmute_after"])
         return self._parsed_metadata
+
+
+def add_comment(issue, user, comment):
+    turning_point = TurningPoint.objects.create(
+        project=issue.project, issue=issue, kind=TurningPointKind.MANUAL_ANNOTATION, user=user, comment=comment,
+        timestamp=timezone.now())
+
+    from alerts.service_backends.slack_app import slack_app_post_comment  # avoid circular import
+    delay_on_commit(slack_app_post_comment, turning_point.id)
+    return turning_point

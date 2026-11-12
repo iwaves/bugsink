@@ -20,6 +20,7 @@ from django.apps import apps
 
 from bugsink.test_utils import TransactionTestCase25251 as TransactionTestCase
 from bugsink.utils import get_model_topography
+from alerts.models import MessagingServiceConfig, SlackMessage
 from projects.models import Project, ProjectMembership
 from releases.models import create_release_if_needed
 from events.factories import create_event, create_event_data
@@ -1358,11 +1359,14 @@ class IssueDeletionTestCase(TransactionTestCase):
 
         store_tags(self.event, self.issue, {"foo": "bar"})
         record_event_counts(self.project, self.issue, self.event.digested_at, self.event.digest_order)
+        SlackMessage.objects.create(
+            issue=self.issue, service_config=MessagingServiceConfig.objects.create(project=self.project),
+            channel="C0123", ts="1.1")
 
     def test_delete_issue(self):
         models = [apps.get_model(app_label=s.split('.')[0], model_name=s.split('.')[1].lower()) for s in [
             'events.Event', 'events.IssueEventCountsPerHour', 'issues.Grouping', 'issues.TurningPoint', 'tags.EventTag',
-            'issues.Issue', 'tags.IssueTag',
+            'issues.Issue', 'tags.IssueTag', 'alerts.SlackMessage',
             'tags.TagValue',  # TagValue 'feels like' a vacuum_model (FKs reversed) but is cleaned up in `prune_orphans`
         ]]
 
@@ -1380,7 +1384,7 @@ class IssueDeletionTestCase(TransactionTestCase):
         # correct for bugsink/transaction.py's select_for_update for non-sqlite databases
         correct_for_select_for_update = 1 if 'sqlite' not in settings.DATABASES['default']['ENGINE'] else 0
 
-        with self.assertNumQueries(22 + correct_for_select_for_update):
+        with self.assertNumQueries(24 + correct_for_select_for_update):
             self.issue.delete_deferred()
 
         # tests run w/ TASK_ALWAYS_EAGER, so in the below we can just check the database directly
@@ -1428,6 +1432,7 @@ class IssueDeletionTestCase(TransactionTestCase):
             (apps.get_model('events', 'IssueEventCountsPerHour'), 'issue'),
             (apps.get_model('tags', 'EventTag'), 'issue'),
             (apps.get_model('tags', 'IssueTag'), 'issue'),
+            (apps.get_model('alerts', 'SlackMessage'), 'issue'),
         ])
 
         self.assertEqual(walk(override, 'issues.Issue'), [
@@ -1437,4 +1442,5 @@ class IssueDeletionTestCase(TransactionTestCase):
             (apps.get_model('events', 'Event'), 'issue'),
             (apps.get_model('issues', 'Grouping'), 'issue'),
             (apps.get_model('tags', 'IssueTag'), 'issue'),
+            (apps.get_model('alerts', 'SlackMessage'), 'issue'),
         ])

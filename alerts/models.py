@@ -86,6 +86,19 @@ class MessagingServiceConfig(models.Model):
         return self.last_failure_timestamp is not None
 
 
+class SlackMessage(models.Model):
+    """An alert posted by the slack_app backend, kept so that it can follow the issue's state (chat.update)."""
+
+    issue = models.ForeignKey("issues.Issue", on_delete=models.DO_NOTHING, related_name="slack_messages")
+    service_config = models.ForeignKey(MessagingServiceConfig, on_delete=models.CASCADE)
+    channel = models.CharField(max_length=32)  # the ID Slack answered with; chat.update does not take "#name"
+    ts = models.CharField(max_length=32)
+
+    class Meta:
+        # ponytail: one chat.update per posted alert; past Slack's rate limit (~50/min) the oldest ones miss out.
+        ordering = ["-id"]
+
+
 class AlertSettings(models.Model):
     """Installation-wide alert settings: a single row (pk=1), edited by superusers."""
 
