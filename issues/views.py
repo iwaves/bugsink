@@ -33,7 +33,7 @@ from theme.templatetags.issues import timestamp_with_millis
 
 from .models import (
     Issue, IssueQuerysetStateManager, IssueStateManager, TurningPoint, TurningPointKind,
-    apply_issue_action, is_valid_issue_action, q_for_invalid_issue_action)
+    add_comment, apply_issue_action, is_valid_issue_action, q_for_invalid_issue_action)
 from .forms import AlertRepeatTimeoutForm, CommentForm
 from .utils import get_values, get_main_exception
 from events.utils import (
@@ -829,11 +829,7 @@ def history_comment_new(request, issue):
             # one special case: we simply ignore newly created comments without any contents as a (presumed) mistake. I
             # think that's amount of magic to have: it still allows one to erase comments (possibly for non-manual
             # kinds) but it saves you from what is obviously a mistake (without complaining with a red box or something)
-            TurningPoint.objects.create(
-                project=issue.project,
-                issue=issue, kind=TurningPointKind.MANUAL_ANNOTATION, user=request.user,
-                comment=form.cleaned_data["comment"],
-                timestamp=timezone.now())
+            add_comment(issue, request.user, form.cleaned_data["comment"])
 
         return redirect(issue_history, issue_pk=issue.pk)
 

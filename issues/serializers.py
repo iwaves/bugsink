@@ -1,7 +1,6 @@
 import datetime
 import json
 
-from django.utils import timezone
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
@@ -9,7 +8,7 @@ from bugsink.api_serializers import UTCModelSerializer
 from bugsink.period_utils import DATEUTIL_KWARGS_MAP
 from tags.models import IssueTag
 
-from .models import Grouping, Issue, TurningPoint, TurningPointKind, issue_lookup_kwargs
+from .models import Grouping, Issue, TurningPoint, TurningPointKind, add_comment, issue_lookup_kwargs
 
 
 class UnmuteVolumeConditionSerializer(serializers.Serializer):
@@ -116,16 +115,9 @@ class IssueCommentSerializer(serializers.Serializer):
     user = serializers.IntegerField(source="user_id", read_only=True, allow_null=True)
 
     def create(self, validated_data):
-        issue = validated_data["issue"]
         auth = self.context["request"].auth
-        return TurningPoint.objects.create(
-            project=issue.project,
-            issue=issue,
-            kind=TurningPointKind.MANUAL_ANNOTATION,
-            user=auth.user if auth.is_user_bound else None,
-            comment=validated_data["comment"],
-            timestamp=timezone.now(),
-        )
+        return add_comment(
+            validated_data["issue"], auth.user if auth.is_user_bound else None, validated_data["comment"])
 
 
 class TurningPointSerializer(UTCModelSerializer):
