@@ -110,7 +110,7 @@ class TestWebhookBackendUsesBuilder(DjangoTestCase):
         config = project.service_configs.create(
             display_name="x", kind="slack", config=json.dumps({"webhook_url": "https://hooks.slack.com/test"}))
 
-        slack_backend_send_alert("https://hooks.slack.com/test", str(issue.id), "New issue", "a", "NEW", config.id)
+        slack_backend_send_alert(str(issue.id), "New issue", "a", "NEW", config.id)
 
         data = json.loads(mock_post.call_args.kwargs["data"])
         self.assertIn("Event in production from CAT Backend", data["text"])
