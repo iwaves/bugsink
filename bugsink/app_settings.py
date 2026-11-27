@@ -25,6 +25,7 @@ _PORT = os.environ.get("PORT", "8000")
 
 DEFAULTS = {
     "BASE_URL": f"http://localhost:{_PORT}",  # no trailing slash
+    "UPLOAD_BASE_URL": None,  # defaults to BASE_URL; override when upload clients need a different address
     "SITE_TITLE": "Bugsink",  # you can customize this as e.g. "My Bugsink" or "Bugsink for My Company"
 
     # Users, teams, projects
@@ -36,7 +37,7 @@ DEFAULTS = {
 
     "USER_REGISTRATION": CB_MEMBERS,  # who can register new users. default: members, i.e. any user can invite others
     "USER_REGISTRATION_VERIFY_EMAIL": True,
-    "USER_REGISTRATION_VERIFY_EMAIL_EXPIRY": 3 * 24 * 60 * 60,  # 7 days
+    "USER_REGISTRATION_VERIFY_EMAIL_EXPIRY": 3 * 24 * 60 * 60,  # 3 days
 
     # if True, there is only one team, and all projects are in that team
     "SINGLE_TEAM": False,
@@ -148,6 +149,9 @@ def _sanitize(settings):
 
     if settings["BASE_URL"].endswith("/"):
         settings["BASE_URL"] = settings["BASE_URL"][:-1]
+
+    if settings["UPLOAD_BASE_URL"] and settings["UPLOAD_BASE_URL"].endswith("/"):
+        settings["UPLOAD_BASE_URL"] = settings["UPLOAD_BASE_URL"][:-1]
 
     if settings["SINGLE_USER"]:
         # this is implemented as a "hard imply". Pro: 'it just works' even when configurations are half-baked; con: may

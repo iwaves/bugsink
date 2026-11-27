@@ -1,7 +1,8 @@
 import io
 import pprint
 import re
-import zlib
+import zlib  # intentionally uses C-zlib to test compatibility with the Rust codec
+import zlib_rust
 import brotli_rs as brotli
 
 from unittest import TestCase as RegularTestCase
@@ -13,17 +14,19 @@ from django.core.exceptions import SuspiciousOperation
 from django.core import mail
 from django.contrib.auth import get_user_model
 from django.test.utils import CaptureQueriesContext
-from django.db import connection
+from django.db import connection, transaction, IntegrityError
+from snappea.settings import get_settings as get_snappea_settings
 from .wsgi import allowed_hosts_error_message
 from .app_settings import override_settings as override_bugsink_settings
 
 from .test_utils import TransactionTestCase25251 as TransactionTestCase
-from .transaction import immediate_atomic
+from .transaction import durable_atomic, immediate_atomic, immediate_semaphores, get_stat
 from .volume_based_condition import VolumeBasedCondition
 from .utils import email_backend_delivers_mail, send_rendered_email
 from .streams import (
-    compress_with_zlib, GeneratorReader, WBITS_PARAM_FOR_GZIP, WBITS_PARAM_FOR_DEFLATE, MaxDataReader,
-    MaxDataWriter, zlib_generator, brotli_generator, BrotliError)
+    compress_with_zlib, GeneratorReader, DEFAULT_CHUNK_SIZE, WBITS_PARAM_FOR_GZIP, WBITS_PARAM_FOR_DEFLATE,
+    MaxDataReader, MaxLengthExceeded,
+    MaxDataWriter, zlib_generator, brotli_generator, BrotliError, ZlibStreamWriter)
 
 User = get_user_model()
 
@@ -156,8 +159,33 @@ class StreamsTestCase(RegularTestCase):
         for wbits in [WBITS_PARAM_FOR_GZIP, WBITS_PARAM_FOR_DEFLATE]:
             compressed = compress_with_zlib(io.BytesIO(b"hello" * 100), wbits)
 
-            with self.assertRaises(zlib.error):
+            with self.assertRaises(zlib_rust.error):
                 list(zlib_generator(io.BytesIO(compressed[:-1]), wbits))
+
+    def test_decompress_stdlib_compressed_stream(self):
+        data = b"hello" * 1000
+        for wbits in [WBITS_PARAM_FOR_GZIP, WBITS_PARAM_FOR_DEFLATE]:
+            compressed = zlib.compress(data, wbits=wbits)
+            reader = GeneratorReader(zlib_generator(io.BytesIO(compressed), wbits, chunk_size=7))
+
+            self.assertEqual(data, reader.read())
+
+    def test_compress_for_stdlib_decompression(self):
+        data = b"hello" * 1000
+        for wbits in [WBITS_PARAM_FOR_GZIP, WBITS_PARAM_FOR_DEFLATE]:
+            compressed = compress_with_zlib(io.BytesIO(data), wbits, chunk_size=7)
+
+            self.assertEqual(data, zlib.decompress(compressed, wbits=wbits))
+
+    def test_zlib_stream_writer_for_stdlib_decompression(self):
+        data = b"hello" * 1000
+        output = io.BytesIO()
+        writer = ZlibStreamWriter(output, level=6, wbits=WBITS_PARAM_FOR_GZIP)
+        writer.write(data[:17])
+        writer.write(data[17:])
+        writer.close()
+
+        self.assertEqual(data, zlib.decompress(output.getvalue(), wbits=WBITS_PARAM_FOR_GZIP))
 
     def test_compress_decompress_brotli(self):
         with open(__file__, 'rb') as f:
@@ -216,6 +244,18 @@ class StreamsTestCase(RegularTestCase):
 
         self.assertEqual("Max length (250) exceeded", str(e.exception))
 
+    def test_max_data_reader_readline_is_limited(self):
+        reader = MaxDataReader(5, io.BytesIO(b"hello\n"))
+
+        with self.assertRaises(MaxLengthExceeded):
+            reader.readline()
+
+    def test_max_data_reader_rejects_unaccounted_methods(self):
+        reader = MaxDataReader(250, io.BytesIO(b"hello"))
+
+        with self.assertRaises(AttributeError):
+            reader.readinto(bytearray(5))
+
     def test_max_data_writer(self):
         stream = io.BytesIO()
         writer = MaxDataWriter(250, stream)
@@ -240,6 +280,12 @@ class StreamsTestCase(RegularTestCase):
         self.assertEqual(b"I a", reader.read(3))
         self.assertEqual(b"m a", reader.read(3))
         self.assertEqual(b" generator", reader.read(None))
+
+    def test_generator_reader_readline_preserves_large_chunks(self):
+        line = b"P" * DEFAULT_CHUNK_SIZE + b"S" * 1808 + b"\n"
+        reader = GeneratorReader(iter([line]))
+
+        self.assertEqual(line, reader.readline())
 
     def test_generator_reader_performance(self):
         # at least one test directly for GeneratorReader; doubles as a regression test for performance issue that showed
@@ -566,6 +612,93 @@ class AllowedHostsMsgTestCase(DjangoTestCase):
 
 
 class TestAtomicTransactions(TransactionTestCase):
+
+    def test_commit_callback_can_start_another_write_transaction(self):
+        if connection.vendor != "sqlite":
+            self.skipTest("Checks the SQLite write semaphore")
+
+        def create_from_callback():
+            acquired = immediate_semaphores["default"].acquire(blocking=False)
+            if acquired:
+                immediate_semaphores["default"].release()
+            self.assertTrue(acquired, "Commit callback still holds the write semaphore")
+            self.assertTrue(User.objects.filter(username="outer").exists())
+            with immediate_atomic():
+                User.objects.create(username="callback")
+
+        with patch.dict(get_snappea_settings(), TASK_ALWAYS_EAGER=False):
+            with immediate_atomic():
+                User.objects.create(username="outer")
+                transaction.on_commit(create_from_callback)
+
+        self.assertTrue(User.objects.filter(username="callback").exists())
+
+    def test_eager_mode_holds_write_semaphore_during_transaction(self):
+        if connection.vendor != "sqlite":
+            self.skipTest("Checks the SQLite write semaphore")
+
+        with patch.dict(get_snappea_settings(), TASK_ALWAYS_EAGER=True):
+            with immediate_atomic():
+                acquired = immediate_semaphores["default"].acquire(blocking=False)
+                if acquired:
+                    immediate_semaphores["default"].release()
+                self.assertFalse(acquired)
+
+    def test_transaction_time_excludes_commit_callback(self):
+        before = get_stat("immediate_transaction")
+        with patch("bugsink.transaction.time.time", return_value=100) as clock:
+            with immediate_atomic():
+                transaction.on_commit(lambda: setattr(clock, "return_value", 110))
+
+        self.assertEqual(0, get_stat("immediate_transaction") - before)
+
+    def test_rolled_back_transaction_does_not_run_callbacks(self):
+        callbacks = []
+        with self.assertRaisesMessage(ValueError, "Abort transaction"):
+            with immediate_atomic():
+                User.objects.create(username="rolled_back")
+                transaction.on_commit(lambda: callbacks.append("rolled_back"))
+                raise ValueError("Abort transaction")
+
+        with immediate_atomic():
+            User.objects.create(username="committed")
+            transaction.on_commit(lambda: callbacks.append("committed"))
+
+        self.assertEqual(["committed"], callbacks)
+        self.assertFalse(User.objects.filter(username="rolled_back").exists())
+
+    def test_failed_commit_discards_callbacks_and_releases_semaphore(self):
+        # This tests failure during commit, rather than an exception in the transaction body:
+        # SQLite defers the foreign-key check until commit.
+        callbacks = []
+        with self.assertRaises(IntegrityError):
+            with immediate_atomic():
+                User.groups.through.objects.create(user_id=-1, group_id=-1)
+                transaction.on_commit(lambda: callbacks.append("failed"))
+
+        with immediate_atomic():
+            User.objects.create(username="committed")
+            transaction.on_commit(lambda: callbacks.append("committed"))
+
+        self.assertEqual(["committed"], callbacks)
+
+    def test_failing_commit_callback_preserves_read_transaction_mode(self):
+        if connection.vendor != "sqlite":
+            self.skipTest("Checks SQLite transaction modes")
+
+        def fail_on_commit():
+            raise ValueError("Commit callback failed")
+
+        with self.assertRaisesMessage(ValueError, "Commit callback failed"):
+            with immediate_atomic():
+                User.objects.create(username="committed")
+                transaction.on_commit(fail_on_commit)
+
+        with CaptureQueriesContext(connection) as queries_context:
+            with durable_atomic():
+                self.assertTrue(User.objects.filter(username="committed").exists())
+
+        self.assertEqual(["BEGIN"], [q["sql"] for q in queries_context if q["sql"].startswith("BEGIN")])
 
     def test_only_if_needed(self):
         with CaptureQueriesContext(connection) as queries_context:
