@@ -60,5 +60,17 @@ class FrontControllerLocationTestCase(TestCase):
     def test_front_controller_as_only_frame_is_kept(self):
         self.assertEqual(self.index["filename"], self.last_frame_filename([self.index]))
 
+    def test_console_entry_point_uses_innermost_frame(self):
+        console = {"filename": "/bin/console", "function": "run", "in_app": True}
+        self.assertEqual(self.vendor["filename"], self.last_frame_filename([console, self.vendor]))
+
+    def test_app_frame_below_console_entry_point_is_kept(self):
+        console = {"filename": "/bin/console", "function": "run", "in_app": True}
+        self.assertEqual(self.app["filename"], self.last_frame_filename([console, self.app, self.vendor]))
+
+    def test_console_entry_point_as_only_frame_is_kept(self):
+        console = {"filename": "/bin/console", "function": "run", "in_app": True}
+        self.assertEqual("/bin/console", self.last_frame_filename([console]))
+
     def test_null_filename_gives_empty_location(self):
         self.assertEqual("", self.last_frame_filename([{"filename": None, "in_app": True}]))
